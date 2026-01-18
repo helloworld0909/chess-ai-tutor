@@ -28,6 +28,15 @@
   - `src/verification/legality.py` → `tests/test_verification.py`
 - Async tests use `pytest-asyncio` with `@pytest.mark.asyncio` decorator
 
+### IDE Diagnostics
+- **Always fix IDE warnings** unless 100% certain they are false positives
+- Check diagnostics with `mcp__ide__getDiagnostics` tool
+- Common fixes:
+  - Unused imports → remove them
+  - `str | None` passed where `str` expected → add `assert x is not None` after validation
+  - Type mismatches → fix the types or add proper narrowing
+- Run type checker: `uv run mypy src/`
+
 ### Code Style
 - Use type hints for all function signatures
 - Docstrings for public functions (Google style)

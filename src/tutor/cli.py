@@ -21,8 +21,8 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from chess_mcp.stockfish import Stockfish
-from chess_mcp.representations import fen_to_ascii, format_for_llm
-from verification.legality import validate_move, parse_move_flexible, MoveFormat
+from chess_mcp.representations import fen_to_ascii
+from verification.legality import parse_move_flexible
 
 
 console = Console()
@@ -142,6 +142,10 @@ class TutorSession:
             console.print(f"[red]Error: {result.error}[/red]")
             return
 
+        # Type narrowing: move_uci and move_san are guaranteed non-None when valid
+        assert result.move_uci is not None
+        assert result.move_san is not None
+
         with console.status("Analyzing move..."):
             comparison = await self.stockfish.compare_moves(
                 self.board.fen(),
@@ -234,6 +238,9 @@ class TutorSession:
         if not result.valid:
             console.print(f"[red]Error: {result.error}[/red]")
             return False
+
+        # Type narrowing: move_uci is guaranteed non-None when valid
+        assert result.move_uci is not None
 
         # Apply move
         chess_move = chess.Move.from_uci(result.move_uci)
