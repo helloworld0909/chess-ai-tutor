@@ -28,6 +28,11 @@
   - `src/verification/legality.py` → `tests/test_verification.py`
 - Async tests use `pytest-asyncio` with `@pytest.mark.asyncio` decorator
 
+### Claude Code Hooks
+- **Auto-formatting**: `scripts/hooks/format.sh` runs after Edit/Write on `.py` files
+- Hook runs `ruff format` and `ruff check --fix --select I` (import sorting)
+- Configured in `.claude/settings.local.json`
+
 ### IDE Diagnostics
 - **Always fix IDE warnings** unless 100% certain they are false positives
 - Check diagnostics with `mcp__ide__getDiagnostics` tool
