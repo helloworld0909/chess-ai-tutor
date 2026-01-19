@@ -49,9 +49,9 @@ class ChessAgent:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:9000/v1",
+        base_url: str = "http://localhost:8100/v1",
         api_key: str = "dummy",
-        model: str = "qwen3-vl-30b-a3b",
+        model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         stockfish_path: str | None = None,
         max_tool_rounds: int = 5,
     ):
@@ -165,12 +165,12 @@ async def main():
     parser = argparse.ArgumentParser(description="Chess AI Tutor Agent")
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("LLM_BASE_URL", "http://localhost:9000/v1"),
+        default=os.environ.get("LLM_BASE_URL", "http://localhost:8100/v1"),
         help="vLLM API base URL",
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("LLM_MODEL", "qwen3-vl-30b-a3b"),
+        default=os.environ.get("LLM_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"),
         help="Model name",
     )
     parser.add_argument(
