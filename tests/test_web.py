@@ -6,7 +6,7 @@ is skipped – we inject mocked state directly into the module globals.
 
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -53,9 +53,14 @@ def _make_mock_stockfish(classification: str = "Best", cp_loss: int = 0) -> Asyn
     score = MagicMock()
     score.mate_in = None
     score.centipawns = 35
+    line = MagicMock()
+    line.best_move = "e2e4"
+    line.score = score
     analysis = MagicMock()
     analysis.score = score
+    analysis.lines = [line]
     mock.analyze.return_value = analysis
+    mock.get_threats.return_value = {"threats": []}
     return mock
 
 
@@ -65,16 +70,22 @@ def inject_state():
     original_games = web_module._games
     original_username = web_module._username
     original_stockfish = web_module._stockfish
+    original_llm_client = web_module._llm_client
+    original_llm_model = web_module._llm_model
 
     web_module._games = [SAMPLE_GAME]
     web_module._username = "alice"
     web_module._stockfish = _make_mock_stockfish()
+    web_module._llm_client = None  # use template fallback by default
+    web_module._llm_model = ""
 
     yield
 
     web_module._games = original_games
     web_module._username = original_username
     web_module._stockfish = original_stockfish
+    web_module._llm_client = original_llm_client
+    web_module._llm_model = original_llm_model
 
 
 @pytest.fixture
@@ -162,6 +173,7 @@ def test_analyze_best_move(client: TestClient):
     assert data["best_move"] == "e2e4"
     assert data["eval_before"] == "+0.35"
     assert len(data["comment"]) > 0
+    assert data["comment_source"] == "template"
 
 
 def test_analyze_blunder(client: TestClient):
@@ -178,6 +190,7 @@ def test_analyze_blunder(client: TestClient):
     assert data["classification"] == "Blunder"
     assert data["is_best"] is False
     assert data["cp_loss"] == 300
+    assert data["comment_source"] == "template"
 
 
 def test_analyze_comment_not_empty(client: TestClient):
@@ -216,6 +229,68 @@ def test_analyze_eval_format_positive(client: TestClient):
     assert res.json()["eval_before"].startswith("+")
 
 
+def test_analyze_llm_comment_used(client: TestClient):
+    """When LLM client is set and returns a response, comment_source is 'llm'."""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "A solid central pawn move controlling key squares."
+    mock_llm.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    web_module._llm_client = mock_llm
+    web_module._llm_model = "test-model"
+
+    res = client.post(
+        "/api/analyze",
+        json={"fen": STARTING_FEN, "move_uci": "e2e4"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["comment_source"] == "llm"
+    assert "solid" in data["comment"]
+
+
+def test_analyze_llm_fallback_on_error(client: TestClient):
+    """When LLM raises an exception, falls back to template comment."""
+    mock_llm = MagicMock()
+    mock_llm.chat.completions.create = AsyncMock(side_effect=Exception("LLM unavailable"))
+
+    web_module._llm_client = mock_llm
+    web_module._llm_model = "test-model"
+
+    res = client.post(
+        "/api/analyze",
+        json={"fen": STARTING_FEN, "move_uci": "e2e4"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["comment_source"] == "template"
+    assert len(data["comment"]) > 0
+
+
+def test_analyze_llm_strips_think_tags(client: TestClient):
+    """Qwen3-style <think>...</think> blocks are stripped from the response."""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = (
+        "<think>Let me reason about this move carefully.</think>"
+        "A strong opening move occupying the center."
+    )
+    mock_llm.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    web_module._llm_client = mock_llm
+    web_module._llm_model = "test-model"
+
+    res = client.post(
+        "/api/analyze",
+        json={"fen": STARTING_FEN, "move_uci": "e2e4"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert "<think>" not in data["comment"]
+    assert "strong opening" in data["comment"]
+    assert data["comment_source"] == "llm"
+
+
 # ── /api/board ────────────────────────────────────────────────────────────────
 
 
@@ -250,3 +325,141 @@ def test_root_serves_html(client: TestClient):
     res = client.get("/")
     assert res.status_code == 200
     assert "text/html" in res.headers["content-type"]
+
+
+# ── _board_ascii ──────────────────────────────────────────────────────────────
+
+
+def test_board_ascii_has_file_labels():
+    import chess
+
+    from tutor.web import _board_ascii
+
+    result = _board_ascii(chess.Board())
+    assert "a b c d e f g h" in result
+
+
+def test_board_ascii_has_rank_labels():
+    import chess
+
+    from tutor.web import _board_ascii
+
+    result = _board_ascii(chess.Board())
+    for rank in "12345678":
+        assert rank in result
+
+
+def test_board_ascii_white_to_move():
+    import chess
+
+    from tutor.web import _board_ascii
+
+    result = _board_ascii(chess.Board())
+    assert "White to move" in result
+
+
+def test_board_ascii_black_to_move():
+    import chess
+
+    from tutor.web import _board_ascii
+
+    board = chess.Board()
+    board.push(chess.Move.from_uci("e2e4"))
+    result = _board_ascii(board)
+    assert "Black to move" in result
+
+
+# ── _move_facts ───────────────────────────────────────────────────────────────
+
+
+def test_move_facts_capture():
+    import chess
+
+    from tutor.web import _move_facts
+
+    # 1.e4 d5 — white can capture exd5
+    board = chess.Board("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2")
+    facts = _move_facts(board, chess.Move.from_uci("e4d5"))
+    assert any("captures pawn" in f for f in facts)
+
+
+def test_move_facts_check():
+    import chess
+
+    from tutor.web import _move_facts
+
+    # White rook on a1, black king on h8, white king on h1 — Ra8 gives check along rank 8
+    board = chess.Board("7k/8/8/8/8/8/8/R6K w - - 0 1")
+    facts = _move_facts(board, chess.Move.from_uci("a1a8"))
+    assert any("check" in f for f in facts)
+
+
+def test_move_facts_castling():
+    import chess
+
+    from tutor.web import _move_facts
+
+    # Standard kingside castling position
+    board = chess.Board("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+    facts = _move_facts(board, chess.Move.from_uci("e1g1"))
+    assert any("castles" in f for f in facts)
+
+
+def test_move_facts_returns_list_for_quiet_move():
+    import chess
+
+    from tutor.web import _move_facts
+
+    facts = _move_facts(chess.Board(), chess.Move.from_uci("e2e4"))
+    assert isinstance(facts, list)
+
+
+def test_move_facts_no_facts_for_missing_piece():
+    import chess
+
+    from tutor.web import _move_facts
+
+    # Empty board — no piece on e2, should return []
+    board = chess.Board("8/8/8/8/8/8/8/K6k w - - 0 1")
+    facts = _move_facts(board, chess.Move.from_uci("e2e4"))
+    assert facts == []
+
+
+# ── board_ascii in LLM prompt ─────────────────────────────────────────────────
+
+
+def test_analyze_llm_prompt_includes_board(client: TestClient):
+    """LLM receives a user message containing the ASCII board."""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "A fine central pawn move."
+    mock_llm.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    web_module._llm_client = mock_llm
+    web_module._llm_model = "test-model"
+
+    client.post("/api/analyze", json={"fen": STARTING_FEN, "move_uci": "e2e4"})
+
+    assert mock_llm.chat.completions.create.called
+    messages = mock_llm.chat.completions.create.call_args.kwargs["messages"]
+    user_content = next(m["content"] for m in messages if m["role"] == "user")
+    assert "a b c d e f g h" in user_content
+
+
+def test_analyze_llm_prompt_includes_move_facts(client: TestClient):
+    """LLM user message includes the verified move facts section."""
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "Good."
+    mock_llm.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    web_module._llm_client = mock_llm
+    web_module._llm_model = "test-model"
+
+    # exd5 — a capture, so move facts will be non-empty
+    fen = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2"
+    client.post("/api/analyze", json={"fen": fen, "move_uci": "e4d5"})
+
+    messages = mock_llm.chat.completions.create.call_args.kwargs["messages"]
+    user_content = next(m["content"] for m in messages if m["role"] == "user")
+    assert "Verified move facts" in user_content

@@ -28,6 +28,8 @@ async def _fetch_and_serve(
     stockfish_path: str | None,
     depth: int,
     no_browser: bool,
+    llm_url: str,
+    llm_model: str,
 ) -> None:
     """Fetch games and start the web server."""
     import os
@@ -37,6 +39,10 @@ async def _fetch_and_serve(
     # Set stockfish path for web.py to pick up
     if stockfish_path:
         os.environ["STOCKFISH_PATH"] = stockfish_path
+
+    # Set LLM config for web.py to pick up
+    os.environ["LLM_BASE_URL"] = llm_url
+    os.environ["LLM_MODEL"] = llm_model
 
     # Fetch games
     with Progress(
@@ -130,6 +136,20 @@ async def _fetch_and_serve(
     default=False,
     help="Don't open a browser automatically",
 )
+@click.option(
+    "--llm-url",
+    default="http://localhost:8100/v1",
+    show_default=True,
+    envvar="LLM_BASE_URL",
+    help="OpenAI-compatible API base URL for LLM comments",
+)
+@click.option(
+    "--llm-model",
+    default="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+    show_default=True,
+    envvar="LLM_MODEL",
+    help="Model name for LLM comments",
+)
 def main(
     username: str,
     months: int,
@@ -137,6 +157,8 @@ def main(
     stockfish: str | None,
     depth: int,
     no_browser: bool,
+    llm_url: str,
+    llm_model: str,
 ) -> None:
     """Review your chess.com games with AI analysis.
 
@@ -160,6 +182,8 @@ def main(
             stockfish_path=stockfish,
             depth=depth,
             no_browser=no_browser,
+            llm_url=llm_url,
+            llm_model=llm_model,
         )
     )
 

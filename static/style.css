@@ -71,8 +71,8 @@ header {
 main {
   display: flex;
   flex: 1;
-  gap: 20px;
-  padding: 20px 24px;
+  gap: 28px;
+  padding: 20px 28px;
   align-items: flex-start;
 }
 
@@ -85,10 +85,10 @@ main {
   flex-shrink: 0;
 }
 
-/* chessground container – must have explicit size */
+/* chessground container – fills roughly half the viewport */
 #board {
-  width: 560px;
-  height: 560px;
+  width:  min(calc(50vw - 56px), 760px);
+  height: min(calc(50vw - 56px), 760px);
   border-radius: var(--radius);
   overflow: hidden;
   box-shadow: 0 8px 24px rgba(0,0,0,0.5);
@@ -137,8 +137,8 @@ main {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  flex: 1;
-  min-width: 0;
+  flex: 0 1 520px;   /* won't grow wider than 520px */
+  min-width: 260px;
 }
 
 .game-info {
@@ -172,11 +172,11 @@ main {
 
 .move-list {
   display: grid;
-  grid-template-columns: 28px 1fr 1fr;
-  gap: 1px 4px;
-  max-height: 160px;
+  grid-template-columns: 24px 1fr 1fr;
+  gap: 0px 4px;
+  max-height: 110px;
   overflow-y: auto;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-family: 'Courier New', monospace;
 }
 
@@ -264,7 +264,20 @@ main {
 
 .best-move-row strong { color: var(--text); font-family: monospace; }
 
-.comment-text { color: var(--text); }
+.comment-text { color: var(--text); max-width: 62ch; line-height: 1.7; }
+
+.source-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: auto;
+}
+
+.source-llm      { background: #1a3a4a; color: #64b5f6; }
+.source-template { background: #2a2a3a; color: var(--text-muted); }
 
 .analysis-loading {
   color: var(--text-muted);

@@ -258,10 +258,15 @@ function renderAnalysis(data) {
   const activeCell = document.querySelector('.move-cell.active');
   if (activeCell) activeCell.dataset.class = cls;
 
+  const sourceBadge = data.comment_source === 'llm'
+    ? '<span class="source-badge source-llm">AI</span>'
+    : '<span class="source-badge source-template">engine</span>';
+
   el.innerHTML = `
     <div class="analysis-row">
       <span class="class-pill class-${cls}">${cls}</span>
       <span class="eval-pill">${data.eval_before}</span>
+      ${sourceBadge}
     </div>
     ${!data.is_best
       ? `<div class="best-move-row">Best: <strong>${data.best_move}</strong>${data.cp_loss > 0 ? ` (−${data.cp_loss} cp)` : ''}</div>`

@@ -17,7 +17,7 @@ services:
       - CUDA_VISIBLE_DEVICES=0,1
     command: >
       Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
-      --gpu-memory-utilization 0.90
+      --gpu-memory-utilization 0.87
       --max-model-len 32768
       --kv-cache-dtype fp8
       --tensor-parallel-size 2
@@ -28,7 +28,7 @@ services:
       resources:
         reservations:
           devices:
-            - driver: nvidia  
+            - driver: nvidia
               count: 2
               capabilities: [gpu]
     healthcheck:

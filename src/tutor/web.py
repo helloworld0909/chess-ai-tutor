@@ -6,7 +6,10 @@ and move analysis using Stockfish.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -14,6 +17,7 @@ from typing import Any, AsyncGenerator
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from chess_mcp.representations import render_board_svg
@@ -23,6 +27,12 @@ from chess_mcp.stockfish import Stockfish
 _games: list[Any] = []
 _stockfish: Stockfish | None = None
 _username: str = ""
+_llm_client: AsyncOpenAI | None = None
+_llm_model: str = ""
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent.parent.parent / "static"
 
@@ -34,10 +44,15 @@ STATIC_DIR = Path(__file__).parent.parent.parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _stockfish
+    global _stockfish, _llm_client, _llm_model
     stockfish_path = os.environ.get("STOCKFISH_PATH")
     _stockfish = Stockfish(path=stockfish_path)
     await _stockfish.start()
+
+    llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8100/v1")
+    _llm_model = os.environ.get("LLM_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8")
+    _llm_client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
+
     yield
     try:
         await _stockfish.stop()
@@ -103,6 +118,7 @@ class AnalyzeResponse(BaseModel):
     is_best: bool
     eval_before: str  # e.g. "+0.35" or "M3"
     comment: str
+    comment_source: str  # "llm" or "template"
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +160,185 @@ def _generate_comment(
             "Always check for tactics before committing to a move."
         )
     return f"Move played: {san}."
+
+
+async def _llm_comment(
+    san: str,
+    classification: str,
+    best_move: str,
+    cp_loss: int,
+    eval_str: str,
+    candidates: list[str],
+    opponent_threats: list[str],
+    move_facts: list[str] | None = None,
+    board_ascii: str = "",
+) -> tuple[str, str]:
+    """Get an AI-generated comment for a move.
+
+    Returns:
+        Tuple of (comment text, source) where source is "llm" or "template".
+    """
+    if _llm_client is None:
+        return _generate_comment(san, classification, best_move, cp_loss == 0), "template"
+
+    best_line = (
+        f"Engine's best move was: {best_move} (−{cp_loss} centipawns)\n" if cp_loss > 0 else ""
+    )
+    candidates_line = f"Engine's top candidates: {', '.join(candidates)}\n" if candidates else ""
+    threats_line = (
+        f"Opponent's threats if you passed: {', '.join(opponent_threats)}\n"
+        if opponent_threats
+        else ""
+    )
+    facts_line = (
+        "Verified move facts:\n" + "\n".join(f"- {f}" for f in move_facts) + "\n"
+        if move_facts
+        else ""
+    )
+    board_section = f"Board position before the move:\n{board_ascii}\n\n" if board_ascii else ""
+    prompt = (
+        f"{board_section}"
+        f"Move played: {san}\n"
+        f"Classification: {classification}\n"
+        f"Engine evaluation before move: {eval_str}\n"
+        f"{best_line}"
+        f"{candidates_line}"
+        f"{threats_line}"
+        f"{facts_line}"
+        "\nWrite 2-3 sentences of chess coaching commentary. "
+        "Base your comment ONLY on the verified move facts listed above. "
+        "Do not invent attacks, captures, or piece positions that are not listed."
+    )
+
+    logger.debug(
+        "LLM context for move %s (%s):\n--- SYSTEM ---\n%s\n--- USER ---\n%s",
+        san,
+        classification,
+        ("You are a concise chess coach giving move-by-move feedback. [see system prompt in code]"),
+        prompt,
+    )
+
+    try:
+        response = await asyncio.wait_for(
+            _llm_client.chat.completions.create(
+                model=_llm_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a concise chess coach giving move-by-move feedback.\n"
+                            "Rules:\n"
+                            "- Your comment MUST agree with the engine classification. "
+                            "If the move is 'Best' or 'Great', explain why it is strong. "
+                            "If it is 'Good', note it is solid. "
+                            "If it is 'Inaccuracy', explain the missed opportunity. "
+                            "If it is 'Mistake' or 'Blunder', explain the error clearly.\n"
+                            "- Never say a 'Best' move is suboptimal or could be improved.\n"
+                            "- Do not repeat the classification label or the eval number.\n"
+                            "- Be specific about the chess ideas (tactics, structure, development).\n"
+                            "- 2-3 sentences maximum."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=150,
+                temperature=0.7,
+            ),
+            timeout=10.0,
+        )
+        text = response.choices[0].message.content or ""
+        text = _THINK_RE.sub("", text).strip()
+        if text:
+            return text, "llm"
+    except Exception:
+        pass
+
+    return _generate_comment(san, classification, best_move, cp_loss == 0), "template"
+
+
+def _board_ascii(board: Any) -> str:
+    """Return a labelled ASCII board (rank/file labels) for LLM context."""
+    import chess
+
+    rows = str(board).split("\n")  # rank 8 at top
+    lines = ["  a b c d e f g h"]
+    for i, row in enumerate(rows):
+        lines.append(f"{8 - i} {row}")
+    lines.append(f"  ({'White' if board.turn == chess.WHITE else 'Black'} to move)")
+    return "\n".join(lines)
+
+
+def _move_facts(board: Any, move: Any) -> list[str]:
+    """Extract verifiable mechanical facts about a move using python-chess."""
+    import chess
+
+    piece = board.piece_at(move.from_square)
+    if piece is None:
+        return []
+
+    facts: list[str] = []
+    piece_name = chess.piece_name(piece.piece_type)
+    our_color = piece.color
+    their_color = not our_color
+    to_sq = chess.square_name(move.to_square)
+
+    # Special moves
+    if board.is_castling(move):
+        facts.append("king castles for safety and connects the rooks")
+        return facts
+    if board.is_en_passant(move):
+        facts.append(f"en passant capture on {to_sq}")
+    elif board.is_capture(move):
+        cap = board.piece_at(move.to_square)
+        if cap:
+            facts.append(f"captures {chess.piece_name(cap.piece_type)} on {to_sq}")
+
+    # Check
+    if board.gives_check(move):
+        facts.append("gives check to the opponent's king")
+
+    # Was the moving piece under attack before? (defensive retreat)
+    if board.attackers(their_color, move.from_square):
+        facts.append(f"rescues the {piece_name} which was under attack")
+
+    # Analyse the resulting position
+    board_after = board.copy()
+    board_after.push(move)
+
+    attacked_sq = board_after.attacks(move.to_square)
+
+    # Enemy pieces now attacked
+    attacked_enemies = [
+        f"{chess.piece_name(p.piece_type)} on {chess.square_name(sq)}"
+        for sq in attacked_sq
+        if (p := board_after.piece_at(sq)) and p.color == their_color
+    ]
+    if attacked_enemies:
+        facts.append(f"now attacks {', '.join(attacked_enemies)}")
+
+    # Own pieces now supported by the moved piece
+    supported = [
+        f"{chess.piece_name(p.piece_type)} on {chess.square_name(sq)}"
+        for sq in attacked_sq
+        if (p := board_after.piece_at(sq)) and p.color == our_color and sq != move.to_square
+    ]
+    if supported:
+        facts.append(f"defends own {', '.join(supported)}")
+
+    # Own pieces that lost their defender after this piece moved away
+    now_hanging = [
+        f"{chess.piece_name(p.piece_type)} on {chess.square_name(sq)}"
+        for sq in board.attacks(move.from_square)
+        if (p := board.piece_at(sq))
+        and p.color == our_color
+        and sq != move.to_square
+        and not board_after.is_attacked_by(our_color, sq)  # no longer defended
+        and board_after.is_attacked_by(their_color, sq)  # opponent attacks it
+    ]
+    if now_hanging:
+        facts.append(f"leaves own {', '.join(now_hanging)} undefended")
+
+    return facts
 
 
 def _format_score(value: int, is_mate: bool) -> str:
@@ -231,24 +426,71 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
     cp_loss: int = comparison["cp_loss"]
     is_best: bool = comparison["is_best"]
 
-    # Get the eval before the move
-    analysis = await _stockfish.analyze(req.fen, depth=16, multipv=1)
+    # Get the eval + top candidates before the move, and opponent threats — run in parallel
+    import chess
+
+    analysis, threats_data = await asyncio.gather(
+        _stockfish.analyze(req.fen, depth=16, multipv=3),
+        _stockfish.get_threats(req.fen),
+    )
     score = analysis.score
     eval_str = _format_score(
         score.mate_in if score.mate_in is not None else (score.centipawns or 0),
         score.mate_in is not None,
     )
 
-    # Get SAN for the comment
-    import chess
-
+    # Convert top candidate moves to SAN for the LLM
     board = chess.Board(req.fen)
+    candidates: list[str] = []
+    for line in analysis.lines[:3]:
+        try:
+            move_san = board.san(chess.Move.from_uci(line.best_move))
+            cp = line.score.centipawns
+            score_str = _format_score(
+                line.score.mate_in if line.score.mate_in is not None else (cp or 0),
+                line.score.mate_in is not None,
+            )
+            candidates.append(f"{move_san} ({score_str})")
+        except Exception:
+            pass
+
+    # Convert opponent threats to SAN (threats use a null-move board, so flip turn)
+    opponent_threats: list[str] = []
+    try:
+        threat_board = chess.Board(req.fen)
+        threat_board.push(chess.Move.null())
+        for t in threats_data.get("threats", [])[:2]:
+            try:
+                threat_san = threat_board.san(chess.Move.from_uci(t["move"]))
+                opponent_threats.append(threat_san)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # SAN for the played move
     try:
         san = board.san(chess.Move.from_uci(req.move_uci))
     except Exception:
         san = req.move_uci
 
-    comment = _generate_comment(san, classification, best_move, is_best)
+    # Compute verified move facts from python-chess (grounded, no hallucination)
+    try:
+        facts = _move_facts(board, chess.Move.from_uci(req.move_uci))
+    except Exception:
+        facts = []
+
+    comment, comment_source = await _llm_comment(
+        san,
+        classification,
+        best_move,
+        cp_loss,
+        eval_str,
+        candidates,
+        opponent_threats,
+        move_facts=facts,
+        board_ascii=_board_ascii(board),
+    )
 
     return AnalyzeResponse(
         classification=classification,
@@ -257,6 +499,7 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
         is_best=is_best,
         eval_before=eval_str,
         comment=comment,
+        comment_source=comment_source,
     )
 
 
