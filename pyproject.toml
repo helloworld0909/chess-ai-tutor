@@ -19,6 +19,7 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "openai>=2.15.0",
+    "fastapi[standard]>=0.115",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ dev = [
 [project.scripts]
 chess-mcp = "chess_mcp.server:main"
 chess-tutor = "tutor.cli:main"
+chess-review = "tutor.review:main"
 
 [build-system]
 requires = ["hatchling"]

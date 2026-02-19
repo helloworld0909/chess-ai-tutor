@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chess Game Review</title>
+
+  <!-- chessground (Lichess board) - pieces embedded as SVG in CSS, no images needed -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.base.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.brown.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.cburnett.css">
+
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <span class="logo">♟ Chess Game Review</span>
+  <div class="header-right">
+    <span id="username-label" class="username-label"></span>
+    <select id="game-select" class="game-select">
+      <option value="">Loading games...</option>
+    </select>
+  </div>
+</header>
+
+<main>
+  <!-- Left: board + controls -->
+  <section class="board-section">
+    <div id="board"></div>
+
+    <div class="board-controls">
+      <button id="btn-start" title="Go to start">⏮</button>
+      <button id="btn-prev"  title="Previous move (←)">◀</button>
+      <button id="btn-next"  title="Next move (→)">▶</button>
+      <button id="btn-end"   title="Go to end">⏭</button>
+      <button id="btn-flip"  title="Flip board" class="btn-secondary">⇅ Flip</button>
+    </div>
+
+    <div class="position-info">
+      <span id="move-counter">—</span>
+      <span id="result-badge" class="result-badge"></span>
+    </div>
+  </section>
+
+  <!-- Right: move list + analysis -->
+  <section class="side-section">
+    <div class="game-info" id="game-info"></div>
+
+    <div class="move-list-container">
+      <div class="panel-title">Moves</div>
+      <div id="move-list" class="move-list"></div>
+    </div>
+
+    <div class="analysis-panel">
+      <div class="panel-title">AI Analysis</div>
+      <div id="analysis-content" class="analysis-content">
+        <p class="placeholder">Select a move to see analysis.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
