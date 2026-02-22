@@ -141,15 +141,13 @@ class ChessCotTransformer(BaseTransformer):
             if len(reasoning) > self.MAX_THINKING_LEN:
                 thinking += "..."
 
-            # Extract coaching summary from the last 2 sentences of reasoning
-            sentences = [s.strip() for s in reasoning.split(".") if s.strip()]
-            coaching = ". ".join(sentences[-2:]) + "." if len(sentences) >= 2 else reasoning[-300:]
-
+            # coaching_text is empty — format_training_sample will generate
+            # a fact-based coaching line from move_facts + classification
             yield RawSample(
                 fen=fen,
                 move_uci=response,
                 move_san=san,
-                coaching_text=coaching,
+                coaching_text="",
                 thinking_text=thinking,
                 source="chess_cot",
             )
@@ -407,22 +405,94 @@ def _format_score(value: int, is_mate: bool) -> str:
     return f"{value / 100:+.2f}"
 
 
+async def _analyze_one(
+    engine: "Stockfish",
+    sample: RawSample,
+    depth: int,
+) -> AugmentedSample | None:
+    """Run Stockfish analysis for a single sample. Returns None on failure."""
+    comparison = await engine.compare_moves(sample.fen, sample.move_uci, depth)
+    if "error" in comparison:
+        return None
+
+    cp_loss = comparison.get("cp_loss", 0)
+    best_move_uci = comparison.get("best_move", "")
+
+    analysis = await engine.analyze(sample.fen, depth=depth, multipv=3)
+    score = analysis.score
+    eval_str = _format_score(
+        score.mate_in if score.mate_in is not None else (score.centipawns or 0),
+        score.mate_in is not None,
+    )
+
+    board = chess.Board(sample.fen)
+    candidates = []
+    for line in analysis.lines[:3]:
+        try:
+            m = chess.Move.from_uci(line.best_move)
+            s = board.san(m)
+            ls = line.score
+            sc = _format_score(
+                ls.mate_in if ls.mate_in is not None else (ls.centipawns or 0),
+                ls.mate_in is not None,
+            )
+            candidates.append(f"{s} ({sc})")
+        except Exception:
+            pass
+
+    try:
+        best_move_san = board.san(chess.Move.from_uci(best_move_uci))
+    except Exception:
+        best_move_san = best_move_uci
+
+    try:
+        threats_data = await engine.get_threats(sample.fen, depth=depth)
+        threat_moves = threats_data.get("threats", [])
+        opponent_threats = []
+        threat_board = board.copy()
+        threat_board.turn = not threat_board.turn
+        for tm in threat_moves[:3]:
+            try:
+                opponent_threats.append(threat_board.san(chess.Move.from_uci(tm)))
+            except Exception:
+                pass
+    except Exception:
+        opponent_threats = []
+
+    return AugmentedSample(
+        fen=sample.fen,
+        move_uci=sample.move_uci,
+        move_san=sample.move_san,
+        coaching_text=sample.coaching_text,
+        thinking_text=sample.thinking_text,
+        source=sample.source,
+        classification=_classify_cp_loss(cp_loss),
+        eval_str=eval_str,
+        best_move_san=best_move_san,
+        cp_loss=cp_loss,
+        candidates=candidates,
+        opponent_threats=opponent_threats,
+    )
+
+
 async def augment_samples(
     samples: list[RawSample],
     stockfish_path: str,
     depth: int = 16,
     cache_path: Path | None = None,
+    workers: int = 4,
 ) -> list[AugmentedSample]:
-    """Add Stockfish analysis to raw samples.
+    """Add Stockfish analysis to raw samples using a parallel worker pool.
 
     Args:
         samples: Raw extracted samples.
         stockfish_path: Path to Stockfish binary.
         depth: Analysis depth (16 is good balance of speed/accuracy).
         cache_path: Optional JSONL cache for resumable augmentation.
+        workers: Number of parallel Stockfish processes.
 
     Returns:
-        List of augmented samples.
+        List of augmented samples (order matches input).
     """
     # Load cache
     cache: dict[str, dict] = {}
@@ -438,135 +508,95 @@ async def augment_samples(
                     continue
         logger.info("Loaded %d cached augmentations", len(cache))
 
-    engine = Stockfish(path=stockfish_path, depth=depth, threads=1, hash_mb=256)
-    await engine.start()
+    # Pre-compute cache keys; separate hits from misses
+    keys = [hashlib.md5(f"{s.fen}:{s.move_uci}".encode()).hexdigest() for s in samples]
+    todo_indices = [i for i, k in enumerate(keys) if k not in cache]
+    logger.info(
+        "Cache: %d hits, %d to augment",
+        len(samples) - len(todo_indices),
+        len(todo_indices),
+    )
 
-    results: list[AugmentedSample] = []
-    cache_file = open(cache_path, "a", encoding="utf-8") if cache_path else None
+    # Result slot per input sample (None = failed or cached-miss)
+    aug_results: list[AugmentedSample | None] = [None] * len(samples)
 
-    try:
-        for i, sample in enumerate(samples):
-            cache_key = hashlib.md5(f"{sample.fen}:{sample.move_uci}".encode()).hexdigest()
+    # Fill in cached results immediately
+    for i, sample in enumerate(samples):
+        k = keys[i]
+        if k in cache:
+            entry = cache[k]
+            aug_results[i] = AugmentedSample(
+                fen=sample.fen,
+                move_uci=sample.move_uci,
+                move_san=sample.move_san,
+                coaching_text=sample.coaching_text,
+                thinking_text=sample.thinking_text,
+                source=sample.source,
+                classification=entry["classification"],
+                eval_str=entry["eval_str"],
+                best_move_san=entry["best_move_san"],
+                cp_loss=entry["cp_loss"],
+                candidates=entry["candidates"],
+                opponent_threats=entry["opponent_threats"],
+            )
 
-            if cache_key in cache:
-                entry = cache[cache_key]
-                results.append(
-                    AugmentedSample(
-                        fen=sample.fen,
-                        move_uci=sample.move_uci,
-                        move_san=sample.move_san,
-                        coaching_text=sample.coaching_text,
-                        thinking_text=sample.thinking_text,
-                        source=sample.source,
-                        classification=entry["classification"],
-                        eval_str=entry["eval_str"],
-                        best_move_san=entry["best_move_san"],
-                        cp_loss=entry["cp_loss"],
-                        candidates=entry["candidates"],
-                        opponent_threats=entry["opponent_threats"],
-                    )
-                )
-                continue
+    if todo_indices:
+        # Build work queue
+        queue: asyncio.Queue[int] = asyncio.Queue()
+        for idx in todo_indices:
+            await queue.put(idx)
 
+        cache_lock = asyncio.Lock()
+        cache_file = open(cache_path, "a", encoding="utf-8") if cache_path else None
+        done_count = [0]  # mutable counter shared across workers
+
+        async def worker() -> None:
+            engine = Stockfish(path=stockfish_path, depth=depth, threads=1, hash_mb=256)
+            await engine.start()
             try:
-                # Run compare_moves for classification
-                comparison = await engine.compare_moves(sample.fen, sample.move_uci, depth)
-                if "error" in comparison:
-                    continue
-
-                cp_loss = comparison.get("cp_loss", 0)
-                best_move_uci = comparison.get("best_move", "")
-
-                # Get evaluation score
-                analysis = await engine.analyze(sample.fen, depth=depth, multipv=3)
-                score = analysis.score
-                eval_str = _format_score(
-                    score.mate_in if score.mate_in is not None else (score.centipawns or 0),
-                    score.mate_in is not None,
-                )
-
-                # Convert candidates to SAN
-                board = chess.Board(sample.fen)
-                candidates = []
-                for line in analysis.lines[:3]:
+                while True:
                     try:
-                        m = chess.Move.from_uci(line.best_move)
-                        s = board.san(m)
-                        ls = line.score
-                        sc = _format_score(
-                            ls.mate_in if ls.mate_in is not None else (ls.centipawns or 0),
-                            ls.mate_in is not None,
-                        )
-                        candidates.append(f"{s} ({sc})")
-                    except Exception:
-                        pass
+                        idx = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    try:
+                        aug = await _analyze_one(engine, samples[idx], depth)
+                        if aug is not None:
+                            aug_results[idx] = aug
+                            if cache_file:
+                                entry = {
+                                    "_cache_key": keys[idx],
+                                    "classification": aug.classification,
+                                    "eval_str": aug.eval_str,
+                                    "best_move_san": aug.best_move_san,
+                                    "cp_loss": aug.cp_loss,
+                                    "candidates": aug.candidates,
+                                    "opponent_threats": aug.opponent_threats,
+                                }
+                                async with cache_lock:
+                                    cache_file.write(json.dumps(entry) + "\n")
+                                    cache_file.flush()
+                    except Exception as e:
+                        logger.warning("Error augmenting sample %d: %s", idx, e)
+                    finally:
+                        queue.task_done()
+                        done_count[0] += 1
+                        if done_count[0] % 100 == 0:
+                            logger.info(
+                                "Augmented %d / %d samples",
+                                done_count[0],
+                                len(todo_indices),
+                            )
+            finally:
+                await engine.stop()
 
-                # Convert best move to SAN
-                try:
-                    best_move_san = board.san(chess.Move.from_uci(best_move_uci))
-                except Exception:
-                    best_move_san = best_move_uci
+        try:
+            await asyncio.gather(*[worker() for _ in range(min(workers, len(todo_indices)))])
+        finally:
+            if cache_file:
+                cache_file.close()
 
-                # Get opponent threats
-                try:
-                    threats_data = await engine.get_threats(sample.fen, depth=depth)
-                    threat_moves = threats_data.get("threats", [])
-                    opponent_threats = []
-                    # Threats are from opponent's perspective — flip turn to parse
-                    threat_board = board.copy()
-                    threat_board.turn = not threat_board.turn
-                    for tm in threat_moves[:3]:
-                        try:
-                            opponent_threats.append(threat_board.san(chess.Move.from_uci(tm)))
-                        except Exception:
-                            pass
-                except Exception:
-                    opponent_threats = []
-
-                classification = _classify_cp_loss(cp_loss)
-
-                aug = AugmentedSample(
-                    fen=sample.fen,
-                    move_uci=sample.move_uci,
-                    move_san=sample.move_san,
-                    coaching_text=sample.coaching_text,
-                    thinking_text=sample.thinking_text,
-                    source=sample.source,
-                    classification=classification,
-                    eval_str=eval_str,
-                    best_move_san=best_move_san,
-                    cp_loss=cp_loss,
-                    candidates=candidates,
-                    opponent_threats=opponent_threats,
-                )
-                results.append(aug)
-
-                # Write to cache
-                if cache_file:
-                    cache_entry = {
-                        "_cache_key": cache_key,
-                        "classification": classification,
-                        "eval_str": eval_str,
-                        "best_move_san": best_move_san,
-                        "cp_loss": cp_loss,
-                        "candidates": candidates,
-                        "opponent_threats": opponent_threats,
-                    }
-                    cache_file.write(json.dumps(cache_entry) + "\n")
-                    cache_file.flush()
-
-            except Exception as e:
-                logger.warning("Error augmenting sample %d: %s", i, e)
-                continue
-
-            if (i + 1) % 100 == 0:
-                logger.info("Augmented %d / %d samples", i + 1, len(samples))
-
-    finally:
-        if cache_file:
-            cache_file.close()
-        await engine.stop()
-
+    results = [r for r in aug_results if r is not None]
     logger.info("Augmentation complete: %d / %d succeeded", len(results), len(samples))
     return results
 
@@ -597,11 +627,23 @@ def format_training_sample(aug: AugmentedSample) -> dict:
         facts=facts,
     )
 
+    # Build coaching text: use provided text or generate from facts + classification
+    coaching = aug.coaching_text
+    if not coaching:
+        # chess_cot samples have no pre-written coaching — build from verifiable facts
+        if facts:
+            facts_str = "; ".join(facts[:2])
+            coaching = (
+                f"{aug.move_san} is the {aug.classification.lower()} move here. It {facts_str}."
+            )
+        else:
+            coaching = f"{aug.move_san} is the {aug.classification.lower()} move in this position."
+
     # Build assistant response with optional thinking
     if aug.thinking_text:
-        assistant = f"<think>{aug.thinking_text}</think>\n\n{aug.coaching_text}"
+        assistant = f"<think>{aug.thinking_text}</think>\n\n{coaching}"
     else:
-        assistant = aug.coaching_text
+        assistant = coaching
 
     return {
         "messages": [
@@ -685,6 +727,7 @@ async def run_pipeline(
     depth: int = 16,
     textbook_path: Path | None = None,
     skip_augment: bool = False,
+    workers: int = 4,
 ) -> None:
     """Run the full extract → augment → format pipeline."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -742,6 +785,7 @@ async def run_pipeline(
             stockfish_path,
             depth=depth,
             cache_path=cache_path,
+            workers=workers,
         )
 
     # Phase 3: Format and split
@@ -794,6 +838,12 @@ def main() -> None:
         action="store_true",
         help="Skip Stockfish augmentation (for testing format only)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel Stockfish workers (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -809,6 +859,7 @@ def main() -> None:
             depth=args.depth,
             textbook_path=args.textbook_path,
             skip_augment=args.skip_augment,
+            workers=args.workers,
         )
     )
 
