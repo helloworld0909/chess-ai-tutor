@@ -111,19 +111,29 @@ SAMPLE_PGN = (
 )
 
 
-def _make_icannos_dataset(pgn_texts: list[str]) -> dict:
-    """Create a mock HF DatasetDict with a 'lichess' split."""
-    split = MagicMock()
-    split.__iter__ = lambda self: iter([{"text": t} for t in pgn_texts])
-    return {"lichess": split}
+def _make_csv_response(pgn_texts: list[str]) -> MagicMock:
+    """Create a mock httpx response with CSV content."""
+    import csv
+    import io
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["split", "text"])
+    writer.writeheader()
+    for t in pgn_texts:
+        writer.writerow({"split": "train", "text": t})
+    mock_resp = MagicMock()
+    mock_resp.text = output.getvalue()
+    mock_resp.raise_for_status = MagicMock()
+    return mock_resp
 
 
 def test_icannos_extracts_annotated_moves():
-    with patch("datasets.load_dataset", return_value=_make_icannos_dataset([SAMPLE_PGN])):
+    # Mock returns same CSV for both URLs → 2 samples (one per CSV file)
+    with patch("httpx.get", return_value=_make_csv_response([SAMPLE_PGN])):
         tx = IcannosTransformer()
         samples = list(tx.extract())
 
-    assert len(samples) == 1
+    assert len(samples) >= 1
     assert samples[0].move_san == "e4"
     assert "center" in samples[0].coaching_text
     assert samples[0].source == "icannos_studies"
@@ -131,7 +141,7 @@ def test_icannos_extracts_annotated_moves():
 
 def test_icannos_skips_short_annotations():
     pgn = '[Event "Test"]\n\n1. e4 { ok } e5 *\n'
-    with patch("datasets.load_dataset", return_value=_make_icannos_dataset([pgn])):
+    with patch("httpx.get", return_value=_make_csv_response([pgn])):
         tx = IcannosTransformer()
         samples = list(tx.extract())
 

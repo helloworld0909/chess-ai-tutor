@@ -19,9 +19,9 @@
 
 ### Testing Requirements
 - Every new function needs unit tests
-- Run tests before committing:
+- Run tests using the test script:
   ```bash
-  STOCKFISH_PATH="/home/zheng/.local/bin/stockfish" uv run pytest tests/ -v
+  ./scripts/test.sh -v
   ```
 - Test files mirror source structure:
   - `src/chess_mcp/stockfish.py` → `tests/test_stockfish.py`

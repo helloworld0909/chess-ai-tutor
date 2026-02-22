@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import random
+import re
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -164,7 +165,7 @@ class IcannosTransformer(BaseTransformer):
     """
 
     DATASET_NAME = "Icannos/chess_studies"
-    MIN_ANNOTATION_LENGTH = 20
+    MIN_ANNOTATION_LENGTH = 60
 
     # Instructive keywords (from extract_annotations.py)
     INSTRUCTIVE_KEYWORDS = [
@@ -213,11 +214,39 @@ class IcannosTransformer(BaseTransformer):
         "losing",
     ]
 
+    # Lichess board annotation markup (arrows, colored squares) — not instructive text
+    _LICHESS_MARKUP_RE = re.compile(r"\[%(?:cal|csl)\s+[^\]]*\]")
+    # Patterns that indicate interactive prompts rather than coaching
+    _INTERACTIVE_PHRASES = [
+        "what would you play",
+        "what do you think",
+        "can you find",
+        "your turn",
+        "remember the movements",
+        "remember the moves",
+        "psst,",
+        "with the arrows",
+        "as i indicate",
+    ]
+
+    def _clean_comment(self, comment: str) -> str:
+        """Strip Lichess markup and normalize whitespace."""
+        cleaned = self._LICHESS_MARKUP_RE.sub("", comment)
+        return " ".join(cleaned.split())
+
     def _is_quality(self, comment: str) -> bool:
         """Check if annotation is instructive enough."""
-        if len(comment) < self.MIN_ANNOTATION_LENGTH:
+        cleaned = self._clean_comment(comment)
+        if len(cleaned) < self.MIN_ANNOTATION_LENGTH:
             return False
-        lower = comment.lower()
+        lower = cleaned.lower()
+        # Reject interactive prompts / questions
+        if any(phrase in lower for phrase in self._INTERACTIVE_PHRASES):
+            return False
+        # Reject annotations that end with a question (quizzes, not coaching)
+        if cleaned.rstrip().endswith("?"):
+            return False
+        # Must contain at least one instructive keyword
         return any(kw in lower for kw in self.INSTRUCTIVE_KEYWORDS)
 
     def _extract_from_pgn(self, pgn_text: str) -> Iterator[RawSample]:
@@ -235,9 +264,10 @@ class IcannosTransformer(BaseTransformer):
             while node.variations:
                 next_node = node.variation(0)
                 if next_node.move:
-                    comment = (next_node.comment or "").strip()
+                    raw_comment = (next_node.comment or "").strip()
+                    comment = self._clean_comment(raw_comment)
 
-                    if self._is_quality(comment):
+                    if self._is_quality(raw_comment):
                         fen = board.fen()
                         move = next_node.move
                         try:
@@ -259,17 +289,32 @@ class IcannosTransformer(BaseTransformer):
                     board.push(next_node.move)
                 node = next_node
 
-    def extract(self, max_samples: int = 0) -> Iterator[RawSample]:
-        from datasets import load_dataset
+    # Direct CSV URLs (the HF loading script is no longer supported)
+    CSV_URLS = [
+        "https://huggingface.co/datasets/Icannos/chess_studies/resolve/main/lichess_studies.csv",
+        "https://huggingface.co/datasets/Icannos/chess_studies/resolve/main/others.csv",
+    ]
 
-        logger.info("Loading %s...", self.DATASET_NAME)
-        ds = load_dataset(self.DATASET_NAME)
+    def extract(self, max_samples: int = 0) -> Iterator[RawSample]:
+        import csv
+
+        import httpx
+
+        logger.info("Loading %s (direct CSV download)...", self.DATASET_NAME)
 
         count = 0
-        for split_name in ds:
-            for row in ds[split_name]:
+        for url in self.CSV_URLS:
+            if max_samples and count >= max_samples:
+                break
+
+            logger.info("Downloading %s...", url.split("/")[-1])
+            resp = httpx.get(url, follow_redirects=True, timeout=60.0)
+            resp.raise_for_status()
+
+            reader = csv.DictReader(io.StringIO(resp.text))
+            for row in reader:
                 if max_samples and count >= max_samples:
-                    return
+                    break
 
                 pgn_text = row.get("text", "")
                 if not pgn_text:
@@ -277,7 +322,7 @@ class IcannosTransformer(BaseTransformer):
 
                 for sample in self._extract_from_pgn(pgn_text):
                     if max_samples and count >= max_samples:
-                        return
+                        break
                     yield sample
                     count += 1
 
@@ -642,6 +687,8 @@ async def run_pipeline(
     skip_augment: bool = False,
 ) -> None:
     """Run the full extract → augment → format pipeline."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     # Phase 1: Extract
     logger.info("=== Phase 1: Extract ===")
     all_raw: list[RawSample] = []
@@ -654,8 +701,11 @@ async def run_pipeline(
         transformers.append(TextbookTransformer(textbook_path))
 
     for tx in transformers:
-        samples = list(tx.extract(max_samples=max_per_source))
-        all_raw.extend(samples)
+        try:
+            samples = list(tx.extract(max_samples=max_per_source))
+            all_raw.extend(samples)
+        except Exception as e:
+            logger.error("Failed to extract from %s: %s", type(tx).__name__, e)
 
     logger.info("Total extracted: %d raw samples", len(all_raw))
 
