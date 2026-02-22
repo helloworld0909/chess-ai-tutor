@@ -403,6 +403,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cairosvg" },
     { name = "click" },
+    { name = "datasets" },
     { name = "fastapi", extra = ["standard"] },
     { name = "httpx" },
     { name = "mcp" },
@@ -444,6 +445,7 @@ requires-dist = [
     { name = "bitsandbytes", marker = "extra == 'training'", specifier = ">=0.43" },
     { name = "cairosvg", specifier = ">=2.7" },
     { name = "click", specifier = ">=8.1" },
+    { name = "datasets", specifier = ">=2.18" },
     { name = "datasets", marker = "extra == 'training'", specifier = ">=2.18" },
     { name = "deepspeed", marker = "extra == 'training'" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115" },

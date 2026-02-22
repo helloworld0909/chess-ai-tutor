@@ -333,7 +333,7 @@ def test_root_serves_html(client: TestClient):
 def test_board_ascii_has_file_labels():
     import chess
 
-    from tutor.web import _board_ascii
+    from tutor.prompts import board_ascii as _board_ascii
 
     result = _board_ascii(chess.Board())
     assert "a b c d e f g h" in result
@@ -342,7 +342,7 @@ def test_board_ascii_has_file_labels():
 def test_board_ascii_has_rank_labels():
     import chess
 
-    from tutor.web import _board_ascii
+    from tutor.prompts import board_ascii as _board_ascii
 
     result = _board_ascii(chess.Board())
     for rank in "12345678":
@@ -352,7 +352,7 @@ def test_board_ascii_has_rank_labels():
 def test_board_ascii_white_to_move():
     import chess
 
-    from tutor.web import _board_ascii
+    from tutor.prompts import board_ascii as _board_ascii
 
     result = _board_ascii(chess.Board())
     assert "White to move" in result
@@ -361,7 +361,7 @@ def test_board_ascii_white_to_move():
 def test_board_ascii_black_to_move():
     import chess
 
-    from tutor.web import _board_ascii
+    from tutor.prompts import board_ascii as _board_ascii
 
     board = chess.Board()
     board.push(chess.Move.from_uci("e2e4"))
@@ -375,7 +375,7 @@ def test_board_ascii_black_to_move():
 def test_move_facts_capture():
     import chess
 
-    from tutor.web import _move_facts
+    from tutor.prompts import move_facts as _move_facts
 
     # 1.e4 d5 — white can capture exd5
     board = chess.Board("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2")
@@ -386,7 +386,7 @@ def test_move_facts_capture():
 def test_move_facts_check():
     import chess
 
-    from tutor.web import _move_facts
+    from tutor.prompts import move_facts as _move_facts
 
     # White rook on a1, black king on h8, white king on h1 — Ra8 gives check along rank 8
     board = chess.Board("7k/8/8/8/8/8/8/R6K w - - 0 1")
@@ -397,7 +397,7 @@ def test_move_facts_check():
 def test_move_facts_castling():
     import chess
 
-    from tutor.web import _move_facts
+    from tutor.prompts import move_facts as _move_facts
 
     # Standard kingside castling position
     board = chess.Board("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
@@ -408,7 +408,7 @@ def test_move_facts_castling():
 def test_move_facts_returns_list_for_quiet_move():
     import chess
 
-    from tutor.web import _move_facts
+    from tutor.prompts import move_facts as _move_facts
 
     facts = _move_facts(chess.Board(), chess.Move.from_uci("e2e4"))
     assert isinstance(facts, list)
@@ -417,7 +417,7 @@ def test_move_facts_returns_list_for_quiet_move():
 def test_move_facts_no_facts_for_missing_piece():
     import chess
 
-    from tutor.web import _move_facts
+    from tutor.prompts import move_facts as _move_facts
 
     # Empty board — no piece on e2, should return []
     board = chess.Board("8/8/8/8/8/8/8/K6k w - - 0 1")

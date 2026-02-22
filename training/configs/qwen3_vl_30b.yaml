@@ -78,7 +78,7 @@ hub_model_id: null  # Set to push to HuggingFace Hub
 
 # DeepSpeed config (for multi-GPU)
 deepspeed:
-  enabled: true
+  enabled: false  # incompatible with Unsloth; use TRL fallback for ZeRO
   config_file: training/configs/ds_zero3.json
 
 # Wandb logging
