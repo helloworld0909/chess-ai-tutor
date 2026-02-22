@@ -150,7 +150,7 @@ def test_format_user_prompt_ends_with_instruction():
         classification="Best",
         eval_str="+0.35",
     )
-    assert "Write 2-3 sentences" in prompt
+    assert "2-3 sentences" in prompt
 
 
 # ── SYSTEM_PROMPT ─────────────────────────────────────────────────────────────

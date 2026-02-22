@@ -104,6 +104,131 @@ class ChessCotTransformer(BaseTransformer):
     MIN_REWARD = 0.5
     MAX_THINKING_LEN = 2048
 
+    # Prefixes that signal "I've decided on my move" — no chess insight
+    _MOVE_DECISION_PREFIXES = (
+        "so my move is",
+        "my move is",
+        "i'll play",
+        "i'll go with",
+        "i'll choose",
+        "therefore, my move",
+        "therefore my move",
+        "so i'll play",
+        "so i will play",
+        "the best move is",
+        "my final answer is",
+        "i will play",
+        "my chosen move",
+    )
+    # Substrings that indicate meta-reasoning (notation, legality) — not chess insight
+    # Checked with `in lower` (substring match), not just startswith
+    _META_PATTERNS = (
+        "uci notation",
+        "in uci",
+        "going from ",
+        "passes through",
+        "the move would be written",
+        "let me check",
+        "let me verify",
+        "let me re-check",
+        "wait, let me",
+        "to verify",
+        "double-check",
+        "is indeed a legal",
+        "is a legal move",
+        "no pieces occupying",
+        "starting and ending square",
+        "looking at the board representation",
+        "the 1st rank",
+        "the board representation",
+        "can legally move",
+        "i don't see any immediate",
+        "there are no immediate",
+    )
+    # Keywords that indicate genuine chess insight
+    _CHESS_KEYWORDS = (
+        "gambit",
+        "defense",
+        "attack",
+        "develop",
+        "center",
+        "control",
+        "king safety",
+        "pawn",
+        "tactical",
+        "strategic",
+        "initiative",
+        "activity",
+        "pressure",
+        "weakness",
+        "advantage",
+        "tempo",
+        "space",
+        "plan",
+        "threat",
+        "counterplay",
+        "fork",
+        "pin",
+        "skewer",
+        "checkmate",
+        "endgame",
+        "opening",
+        "middlegame",
+        "piece",
+        "rook",
+        "knight",
+        "bishop",
+        "queen",
+        "because",
+        "allows",
+        "prevents",
+        "creates",
+        "secures",
+        "improves",
+        "activates",
+        "centralizes",
+        "stronger",
+        "weaker",
+        "winning",
+        "losing",
+        "equal",
+    )
+
+    @classmethod
+    def _extract_coaching(cls, reasoning: str, san: str) -> str:
+        """Extract the strategic insight paragraph from reasoning.
+
+        The reasoning usually ends with move-decision bookkeeping or legality
+        checks. We want the last substantive paragraph that explains *why*
+        the move is good/bad in chess terms.
+        """
+        paragraphs = [p.strip() for p in reasoning.split("\n\n") if p.strip()]
+
+        best: str = ""
+        for para in reversed(paragraphs):
+            lower = para.lower()
+            if len(para) < 60:
+                continue
+            if any(lower.startswith(prefix) for prefix in cls._MOVE_DECISION_PREFIXES):
+                continue
+            if any(pattern in lower for pattern in cls._META_PATTERNS):
+                continue
+            # Prefer paragraphs that contain chess insight keywords
+            has_insight = any(kw in lower for kw in cls._CHESS_KEYWORDS)
+            if has_insight:
+                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
+                coaching = " ".join(sentences[-2:]) if len(sentences) >= 2 else para
+                coaching = re.sub(r"\b[a-h][1-8][a-h][1-8][qrbn]?\b", san, coaching)
+                return coaching[:500].strip()
+            # Keep as fallback if nothing better found
+            if not best:
+                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
+                best = " ".join(sentences[-2:]) if len(sentences) >= 2 else para
+
+        if best:
+            return re.sub(r"\b[a-h][1-8][a-h][1-8][qrbn]?\b", san, best)[:500].strip()
+        return reasoning.strip()[-300:].strip()
+
     def extract(self, max_samples: int = 0) -> Iterator[RawSample]:
         from datasets import load_dataset
 
@@ -141,13 +266,16 @@ class ChessCotTransformer(BaseTransformer):
             if len(reasoning) > self.MAX_THINKING_LEN:
                 thinking += "..."
 
-            # coaching_text is empty — format_training_sample will generate
-            # a fact-based coaching line from move_facts + classification
+            # Extract strategic coaching insight from the reasoning conclusion.
+            # The reasoning typically ends with "So my move is X" — we want
+            # the substantive paragraph just before that conclusion.
+            coaching = self._extract_coaching(reasoning, san)
+
             yield RawSample(
                 fen=fen,
                 move_uci=response,
                 move_san=san,
-                coaching_text="",
+                coaching_text=coaching,
                 thinking_text=thinking,
                 source="chess_cot",
             )
@@ -628,17 +756,11 @@ def format_training_sample(aug: AugmentedSample) -> dict:
         fen=aug.fen,
     )
 
-    # Build coaching text: use provided text or generate from facts + classification
+    # Build coaching text: use provided text; last-resort fallback only
     coaching = aug.coaching_text
     if not coaching:
-        # chess_cot samples have no pre-written coaching — build from verifiable facts
-        if facts:
-            facts_str = "; ".join(facts[:2])
-            coaching = (
-                f"{aug.move_san} is the {aug.classification.lower()} move here. It {facts_str}."
-            )
-        else:
-            coaching = f"{aug.move_san} is the {aug.classification.lower()} move in this position."
+        # Should rarely happen — use a minimal classification-grounded line
+        coaching = f"{aug.move_san} is the {aug.classification.lower()} move in this position."
 
     # Build assistant response with optional thinking
     if aug.thinking_text:
