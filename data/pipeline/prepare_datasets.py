@@ -625,6 +625,7 @@ def format_training_sample(aug: AugmentedSample) -> dict:
         candidates=aug.candidates,
         opponent_threats=aug.opponent_threats,
         facts=facts,
+        fen=aug.fen,
     )
 
     # Build coaching text: use provided text or generate from facts + classification

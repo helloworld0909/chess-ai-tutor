@@ -128,6 +128,7 @@ def format_user_prompt(
     candidates: list[str] | None = None,
     opponent_threats: list[str] | None = None,
     facts: list[str] | None = None,
+    fen: str = "",
 ) -> str:
     """Build the user message for the chess coaching prompt.
 
@@ -146,8 +147,11 @@ def format_user_prompt(
     facts_line = (
         "Verified move facts:\n" + "\n".join(f"- {f}" for f in facts) + "\n" if facts else ""
     )
+    fen_line = f"FEN: {fen}\n" if fen else ""
     board_section = (
-        f"Board position before the move:\n{board_ascii_str}\n\n" if board_ascii_str else ""
+        f"Board position before the move:\n{board_ascii_str}\n{fen_line}\n"
+        if board_ascii_str
+        else ""
     )
 
     return (

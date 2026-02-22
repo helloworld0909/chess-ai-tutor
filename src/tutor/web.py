@@ -178,6 +178,7 @@ async def _llm_comment(
     opponent_threats: list[str],
     move_facts_list: list[str] | None = None,
     board_ascii_str: str = "",
+    fen: str = "",
 ) -> tuple[str, str]:
     """Get an AI-generated comment for a move.
 
@@ -197,6 +198,7 @@ async def _llm_comment(
         candidates=candidates,
         opponent_threats=opponent_threats,
         facts=move_facts_list,
+        fen=fen,
     )
 
     logger.debug(
@@ -379,6 +381,7 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
         opponent_threats,
         move_facts_list=facts,
         board_ascii_str=board_ascii(board),
+        fen=req.fen,
     )
 
     return AnalyzeResponse(
