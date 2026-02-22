@@ -104,24 +104,7 @@ class ChessCotTransformer(BaseTransformer):
     MIN_REWARD = 0.5
     MAX_THINKING_LEN = 2048
 
-    # Prefixes that signal "I've decided on my move" — no chess insight
-    _MOVE_DECISION_PREFIXES = (
-        "so my move is",
-        "my move is",
-        "i'll play",
-        "i'll go with",
-        "i'll choose",
-        "therefore, my move",
-        "therefore my move",
-        "so i'll play",
-        "so i will play",
-        "the best move is",
-        "my final answer is",
-        "i will play",
-        "my chosen move",
-    )
-    # Substrings that indicate meta-reasoning (notation, legality) — not chess insight
-    # Checked with `in lower` (substring match), not just startswith
+    # Substrings that flag meta-reasoning — notation checks, legality, bookkeeping
     _META_PATTERNS = (
         "uci notation",
         "in uci",
@@ -144,17 +127,23 @@ class ChessCotTransformer(BaseTransformer):
         "can legally move",
         "i don't see any immediate",
         "there are no immediate",
+        "i'm playing as",
+        "i am playing as",
+        "threats:",
+        "it's a standard opening",
+        "it is a standard opening",
     )
     # Keywords that indicate genuine chess insight
+    # Strategic/analytical keywords — excludes bare piece names (rook/bishop/queen)
+    # which also appear in position-enumeration paragraphs
     _CHESS_KEYWORDS = (
         "gambit",
         "defense",
         "attack",
         "develop",
-        "center",
-        "control",
+        "controls the center",
+        "pawn structure",
         "king safety",
-        "pawn",
         "tactical",
         "strategic",
         "initiative",
@@ -164,26 +153,19 @@ class ChessCotTransformer(BaseTransformer):
         "advantage",
         "tempo",
         "space",
-        "plan",
-        "threat",
         "counterplay",
         "fork",
         "pin",
         "skewer",
         "checkmate",
+        "mate in",
         "endgame",
         "opening",
         "middlegame",
-        "piece",
-        "rook",
-        "knight",
-        "bishop",
-        "queen",
         "because",
         "allows",
         "prevents",
         "creates",
-        "secures",
         "improves",
         "activates",
         "centralizes",
@@ -191,43 +173,49 @@ class ChessCotTransformer(BaseTransformer):
         "weaker",
         "winning",
         "losing",
-        "equal",
+        "equal position",
     )
 
-    @classmethod
-    def _extract_coaching(cls, reasoning: str, san: str) -> str:
-        """Extract the strategic insight paragraph from reasoning.
+    # Regex: paragraph is mostly bullet-list lines (piece enumeration)
+    _BULLET_LIST_RE = re.compile(r"^(?:\s*-\s+\S)", re.MULTILINE)
 
-        The reasoning usually ends with move-decision bookkeeping or legality
-        checks. We want the last substantive paragraph that explains *why*
-        the move is good/bad in chess terms.
+    @classmethod
+    def _is_list_paragraph(cls, para: str) -> bool:
+        """Return True if the paragraph is mostly bullet-list lines."""
+        lines = [l for l in para.splitlines() if l.strip()]
+        if not lines:
+            return False
+        bullet_lines = sum(1 for l in lines if l.strip().startswith("- "))
+        return bullet_lines / len(lines) >= 0.5
+
+    @classmethod
+    def _extract_coaching(cls, reasoning: str) -> str:
+        """Extract the most chess-insightful prose paragraph from the reasoning.
+
+        The move is already known from the `response` field. Skip:
+        - Bullet-list position enumerations ("- Rook on a1 ...")
+        - Meta-reasoning (notation, legality checks)
+        Then return the first paragraph that contains genuine chess insight.
         """
         paragraphs = [p.strip() for p in reasoning.split("\n\n") if p.strip()]
 
-        best: str = ""
-        for para in reversed(paragraphs):
+        fallback: str = ""
+        for para in paragraphs:
             lower = para.lower()
             if len(para) < 60:
                 continue
-            if any(lower.startswith(prefix) for prefix in cls._MOVE_DECISION_PREFIXES):
+            if cls._is_list_paragraph(para):
                 continue
             if any(pattern in lower for pattern in cls._META_PATTERNS):
                 continue
-            # Prefer paragraphs that contain chess insight keywords
-            has_insight = any(kw in lower for kw in cls._CHESS_KEYWORDS)
-            if has_insight:
+            if any(kw in lower for kw in cls._CHESS_KEYWORDS):
                 sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
-                coaching = " ".join(sentences[-2:]) if len(sentences) >= 2 else para
-                coaching = re.sub(r"\b[a-h][1-8][a-h][1-8][qrbn]?\b", san, coaching)
-                return coaching[:500].strip()
-            # Keep as fallback if nothing better found
-            if not best:
-                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
-                best = " ".join(sentences[-2:]) if len(sentences) >= 2 else para
+                snippet = " ".join(sentences[-2:]) if len(sentences) >= 2 else para
+                return snippet[:500].strip()
+            if not fallback:
+                fallback = para
 
-        if best:
-            return re.sub(r"\b[a-h][1-8][a-h][1-8][qrbn]?\b", san, best)[:500].strip()
-        return reasoning.strip()[-300:].strip()
+        return fallback[:500].strip() if fallback else reasoning[:300].strip()
 
     def extract(self, max_samples: int = 0) -> Iterator[RawSample]:
         from datasets import load_dataset
@@ -269,7 +257,7 @@ class ChessCotTransformer(BaseTransformer):
             # Extract strategic coaching insight from the reasoning conclusion.
             # The reasoning typically ends with "So my move is X" — we want
             # the substantive paragraph just before that conclusion.
-            coaching = self._extract_coaching(reasoning, san)
+            coaching = self._extract_coaching(reasoning)
 
             yield RawSample(
                 fen=fen,
