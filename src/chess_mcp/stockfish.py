@@ -167,6 +167,8 @@ class Stockfish:
             raise StockfishError("Stockfish not started")
 
         line = await self._process.stdout.readline()
+        if not line:
+            raise StockfishError("Stockfish process died (EOF)")
         return line.decode().strip()
 
     async def _wait_for(self, expected: str) -> str:
@@ -419,8 +421,7 @@ class Stockfish:
                 for sq in attacks
                 if board_copy.piece_at(sq)
                 and board_copy.piece_at(sq).color != piece.color
-                and board_copy.piece_at(sq).piece_type
-                in [chess.QUEEN, chess.ROOK, chess.KING]
+                and board_copy.piece_at(sq).piece_type in [chess.QUEEN, chess.ROOK, chess.KING]
             )
             if valuable_targets >= 2:
                 return "fork"

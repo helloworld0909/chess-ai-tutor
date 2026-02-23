@@ -205,6 +205,31 @@ def test_format_training_sample_has_three_messages():
     assert roles == ["system", "user", "assistant"]
 
 
+def test_format_training_sample_includes_tool_messages():
+    tool_msgs = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": '{"query":"Ruy Lopez"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": '[{"title":"Ruy Lopez","snippet":"1.e4 e5 2.Nf3 Nc6 3.Bb5","url":"https://lichess.org"}]',
+        },
+    ]
+    sample = format_training_sample(_make_augmented_sample(tool_messages=tool_msgs))
+    roles = [m["role"] for m in sample["messages"]]
+    assert roles == ["system", "user", "assistant", "tool", "assistant"]
+    assert sample["messages"][2]["tool_calls"][0]["function"]["name"] == "web_search"
+
+
 def test_format_training_sample_user_has_board():
     sample = format_training_sample(_make_augmented_sample())
     user = sample["messages"][1]["content"]

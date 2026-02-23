@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import io
 import json
@@ -23,9 +24,9 @@ import random
 import re
 import sys
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import chess
 import chess.pgn
@@ -35,6 +36,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from chess_mcp.stockfish import Stockfish
 from tutor.prompts import SYSTEM_PROMPT, board_ascii, format_user_prompt, move_facts
+from tutor.tools import CHESS_TOOLS
+from tutor.tools import web_search as _web_search
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -73,6 +76,7 @@ class AugmentedSample:
     cp_loss: int
     candidates: list[str]  # e.g. ["e4 (+0.35)", "d4 (+0.30)"]
     opponent_threats: list[str]
+    tool_messages: list[dict] = field(default_factory=list)  # intermediate tool call turns
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +106,7 @@ class ChessCotTransformer(BaseTransformer):
 
     DATASET_NAME = "kr4t0n/chess-cot"
     MIN_REWARD = 0.5
-    MAX_THINKING_LEN = 2048
+    MAX_THINKING_LEN = 6000
 
     # Substrings that flag meta-reasoning — notation checks, legality, bookkeeping
     _META_PATTERNS = (
@@ -177,8 +181,6 @@ class ChessCotTransformer(BaseTransformer):
     )
 
     # Regex: paragraph is mostly bullet-list lines (piece enumeration)
-    _BULLET_LIST_RE = re.compile(r"^(?:\s*-\s+\S)", re.MULTILINE)
-
     @classmethod
     def _is_list_paragraph(cls, para: str) -> bool:
         """Return True if the paragraph is mostly bullet-list lines."""
@@ -612,17 +614,10 @@ async def augment_samples(
     """
     # Load cache
     cache: dict[str, dict] = {}
-    if cache_path and cache_path.exists():
-        with open(cache_path, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                    key = entry.get("_cache_key", "")
-                    if key:
-                        cache[key] = entry
-                except json.JSONDecodeError:
-                    continue
-        logger.info("Loaded %d cached augmentations", len(cache))
+    if cache_path:
+        cache = _load_jsonl_cache(cache_path, key_field="_cache_key")
+        if cache:
+            logger.info("Loaded %d cached augmentations", len(cache))
 
     # Pre-compute cache keys; separate hits from misses
     keys = [hashlib.md5(f"{s.fen}:{s.move_uci}".encode()).hexdigest() for s in samples]
@@ -718,6 +713,428 @@ async def augment_samples(
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_jsonl_cache(path: Path, key_field: str = "_key") -> dict[str, dict]:
+    """Load a JSONL cache file into a dict keyed by *key_field*."""
+    cache: dict[str, dict] = {}
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    k = entry.get(key_field, "")
+                    if k:
+                        cache[k] = entry
+                except json.JSONDecodeError:
+                    continue
+    return cache
+
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_thinking(text: str) -> tuple[str, str]:
+    """Split LLM output into (thinking, coaching) text.
+
+    Handles the Qwen3 quirk where ``</think>`` appears without ``<think>``.
+    Returns ("", "") when the thinking block is truncated (no ``</think>``).
+    """
+    # Normalize missing opening tag (Qwen3 quirk)
+    if "</think>" in text and "<think>" not in text:
+        text = "<think>" + text
+    match = _THINK_RE.search(text)
+    if match:
+        thinking = match.group(0)[len("<think>") : -len("</think>")].strip()
+        coaching = _THINK_RE.sub("", text).strip()
+        return thinking, coaching
+    if "<think>" in text:  # truncated — no closing tag
+        return "", ""
+    return "", text  # no thinking block at all
+
+
+async def _dispatch_tool_call(tc: Any, aug_fen: str, sf_pool: Any) -> tuple[str, str]:
+    """Execute a single tool call, return (result_json, trace_line)."""
+    args = json.loads(tc.function.arguments)
+    if tc.function.name == "web_search":
+        query = args.get("query", "")
+        result_str = await _web_search(query)
+        return result_str, f"web_search({query!r}) → {result_str[:200]}"
+    # analyze_position
+    fen_q = args.get("fen", aug_fen)
+    multipv = min(int(args.get("multipv", 3)), 5)
+    tool_result = await sf_pool.analyze(fen_q, multipv=multipv)
+    result_str = json.dumps(tool_result)
+    return result_str, f"analyze_position(fen={fen_q}, multipv={multipv}) → {result_str}"
+
+
+# ---------------------------------------------------------------------------
+# LLM coaching generation with Stockfish tool use (Phase 2.5)
+# ---------------------------------------------------------------------------
+
+
+class StockfishPool:
+    """Pool of Stockfish instances shared by the LLM tool-call handler."""
+
+    def __init__(self, stockfish_path: str, size: int = 8, depth: int = 14):
+        self._path = stockfish_path
+        self._size = size
+        self._depth = depth
+        self._queue: asyncio.Queue = asyncio.Queue()
+
+    async def start(self) -> None:
+        for _ in range(self._size):
+            sf = Stockfish(path=self._path, depth=self._depth, threads=1, hash_mb=128)
+            await sf.start()
+            self._queue.put_nowait(sf)
+
+    async def stop(self) -> None:
+        while not self._queue.empty():
+            sf = self._queue.get_nowait()
+            await sf.stop()
+
+    async def analyze(self, fen: str, multipv: int = 3) -> dict:
+        """Run analysis and return a JSON-serialisable result dict."""
+        sf: Stockfish = await asyncio.wait_for(self._queue.get(), timeout=30.0)
+        try:
+            board = chess.Board(fen)
+            analysis = await asyncio.wait_for(
+                sf.analyze(fen, depth=self._depth, multipv=multipv), timeout=30.0
+            )
+            sc = analysis.score
+            eval_str = _format_score(
+                sc.mate_in if sc.mate_in is not None else (sc.centipawns or 0),
+                sc.mate_in is not None,
+            )
+            result: dict = {
+                "eval": eval_str,
+                "side_to_move": "White" if board.turn == chess.WHITE else "Black",
+                "top_moves": [],
+            }
+            for line in analysis.lines[:multipv]:
+                try:
+                    m = chess.Move.from_uci(line.best_move)
+                    ls = line.score
+                    lsc = _format_score(
+                        ls.mate_in if ls.mate_in is not None else (ls.centipawns or 0),
+                        ls.mate_in is not None,
+                    )
+                    # Build short PV in SAN
+                    pv_board = board.copy()
+                    pv_sans: list[str] = []
+                    for uci in line.pv[:5]:
+                        try:
+                            pv_m = chess.Move.from_uci(uci)
+                            pv_sans.append(pv_board.san(pv_m))
+                            pv_board.push(pv_m)
+                        except Exception:
+                            break
+                    result["top_moves"].append(
+                        {"move": board.san(m), "eval": lsc, "pv": " ".join(pv_sans)}
+                    )
+                except Exception:
+                    pass
+            return result
+        finally:
+            self._queue.put_nowait(sf)
+
+
+def _game_phase(fen: str) -> str:
+    """Classify a position as 'opening', 'middlegame', or 'endgame'."""
+    board = chess.Board(fen)
+    fullmove = board.fullmove_number
+    non_king = sum(
+        len(board.pieces(pt, c))
+        for c in chess.COLORS
+        for pt in [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.PAWN]
+    )
+    has_queens = bool(
+        board.pieces(chess.QUEEN, chess.WHITE) or board.pieces(chess.QUEEN, chess.BLACK)
+    )
+    if fullmove <= 12 and non_king >= 24:
+        return "opening"
+    if non_king <= 10 or (not has_queens and non_king <= 16):
+        return "endgame"
+    return "middlegame"
+
+
+async def _coach_one(
+    aug: AugmentedSample,
+    client: Any,  # AsyncOpenAI — imported lazily inside generate_coaching_with_llm
+    llm_model: str,
+    sf_pool: StockfishPool,
+    semaphore: asyncio.Semaphore,
+) -> tuple[str, str, list[dict]]:
+    """Run one sample through the agentic coaching loop.
+
+    Returns (new_thinking_text, new_coaching_text, tool_turns).
+    tool_turns is the list of intermediate assistant-with-tool-calls + tool-result
+    messages to include in the training data so the model learns tool use.
+    Falls back to (aug.thinking_text, "", []) on failure.
+    """
+    has_prior_thinking = bool(aug.thinking_text)
+
+    board = chess.Board(aug.fen)
+    facts = move_facts(board, chess.Move.from_uci(aug.move_uci))
+    user_msg = format_user_prompt(
+        board_ascii_str=board_ascii(board),
+        san=aug.move_san,
+        classification=aug.classification,
+        eval_str=aug.eval_str,
+        best_move=aug.best_move_san,
+        cp_loss=aug.cp_loss,
+        candidates=aug.candidates,
+        opponent_threats=aug.opponent_threats,
+        facts=facts,
+        fen=aug.fen,
+    )
+
+    # Compute the FEN after the move so the LLM can analyze the resulting position
+    board_after = board.copy()
+    board_after.push(chess.Move.from_uci(aug.move_uci))
+    fen_after = board_after.fen()
+
+    # Phase-specific tool directive
+    phase = _game_phase(aug.fen)
+    if phase == "opening":
+        tool_directive = (
+            "\n\nThis is an OPENING position. Focus on opening theory — name the "
+            "opening or variation and state whether this is a recognized book move "
+            "or a deviation. Use web_search to look up the exact opening name. "
+            "When calling web_search, include the FULL move sequence from move 1 in your "
+            "query, e.g. 'Ruy Lopez e4 e5 Nf3 Nc6 Bb5' — do NOT use FEN strings or "
+            "isolated moves like 'Bb5 theory'. "
+            "You do NOT need to call analyze_position unless the move is an "
+            "Inaccuracy/Mistake/Blunder and you want to show the correct continuation."
+        )
+    elif phase == "endgame":
+        tool_directive = (
+            f"\n\nThis is an ENDGAME position. You MUST call analyze_position to "
+            f"explore key variations before writing your comment. Analyze the "
+            f"position AFTER this move (FEN = {fen_after}) and compare with the "
+            f"best alternative (FEN = {aug.fen}) to explain the winning or losing idea. "
+            f"Feel free to make multiple tool calls to trace concrete lines."
+        )
+    else:  # middlegame
+        tool_directive = (
+            f"\n\nThis is a MIDDLEGAME position. Call analyze_position to verify "
+            f"the key tactical or strategic lines before commenting. "
+            f"Start by analyzing the position AFTER this move (FEN = {fen_after}). "
+            f"You may also analyze before the move (FEN = {aug.fen}) to compare alternatives."
+        )
+    user_msg_with_directive = user_msg + tool_directive
+
+    messages: list[dict] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg_with_directive},
+    ]
+    tool_trace: list[str] = []
+
+    async with semaphore:
+        for round_idx in range(7):  # up to 5 tool calls + 1 final answer + 1 safety
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=llm_model,
+                        messages=messages,
+                        tools=CHESS_TOOLS,
+                        tool_choice="auto",
+                        max_tokens=8192,
+                        temperature=0.7,
+                        extra_body={"chat_template_kwargs": {"thinking_budget": 2048}},
+                    ),
+                    timeout=300.0,
+                )
+            except Exception as e:
+                logger.warning("LLM call error for %s %s: %s", aug.move_san, aug.fen[:20], e)
+                return aug.thinking_text, "", []
+
+            choice = resp.choices[0]
+            msg = choice.message
+
+            if choice.finish_reason == "tool_calls" and msg.tool_calls:
+                # Append assistant turn with tool_calls
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in msg.tool_calls
+                        ],
+                    }
+                )
+                for tc in msg.tool_calls:
+                    try:
+                        result_str, trace = await _dispatch_tool_call(tc, aug.fen, sf_pool)
+                        tool_trace.append(trace)
+                    except Exception as e:
+                        result_str = json.dumps({"error": str(e)})
+                        tool_trace.append(f"{tc.function.name} error: {e}")
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+                continue  # back to LLM with tool results
+
+            # Final response — extract coaching text and tool turns
+            tool_turns = messages[2:]
+            lm_thinking, text = _strip_thinking((msg.content or "").strip())
+
+            if has_prior_thinking:
+                # chess_cot: discard LLM thinking, keep original reasoning
+                thinking = aug.thinking_text
+                if tool_trace:
+                    thinking += "\n\n[Engine exploration]\n" + "\n".join(tool_trace)
+            else:
+                # Icannos/textbook: use LLM thinking + tool trace
+                parts: list[str] = []
+                if lm_thinking:
+                    parts.append(lm_thinking)
+                if tool_trace:
+                    parts.append("[Engine exploration]\n" + "\n".join(tool_trace))
+                thinking = "\n\n".join(parts)
+
+            if not text:
+                logger.warning(
+                    "Empty coaching for %s %s after %d rounds (finish=%s, raw_len=%d)",
+                    aug.move_san,
+                    aug.fen[:20],
+                    round_idx + 1,
+                    choice.finish_reason,
+                    len(msg.content or ""),
+                )
+            return thinking, text, tool_turns
+
+    logger.warning(
+        "Loop exhausted (7 rounds) for %s %s — no final answer", aug.move_san, aug.fen[:20]
+    )
+    return aug.thinking_text, "", []
+
+
+async def generate_coaching_with_llm(
+    samples: list[AugmentedSample],
+    llm_base_url: str,
+    llm_model: str,
+    stockfish_path: str,
+    cache_path: Path | None = None,
+    concurrency: int = 8,
+) -> list[AugmentedSample]:
+    """Generate grounded coaching using an LLM agent with Stockfish tool use.
+
+    The LLM can call analyze_position() to explore variations before writing
+    its coaching comment, eliminating hallucinated piece positions and tactics.
+    Results are cached so the step is fully resumable.
+    """
+    from openai import AsyncOpenAI
+
+    # Load cache — entries store {"_key", "coaching", "thinking"(optional)}
+    coaching_cache: dict[str, dict] = {}
+    if cache_path:
+        coaching_cache = _load_jsonl_cache(cache_path)
+        if coaching_cache:
+            logger.info("LLM coaching cache: %d entries loaded", len(coaching_cache))
+
+    client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
+    semaphore = asyncio.Semaphore(concurrency)
+    cache_lock = asyncio.Lock()
+    cache_file = open(cache_path, "a", encoding="utf-8") if cache_path else None
+    done_count = [0]
+
+    # Stockfish pool for tool calls — one instance per concurrent LLM request
+    sf_pool = StockfishPool(stockfish_path, size=concurrency, depth=14)
+    await sf_pool.start()
+
+    results = list(samples)
+
+    async def rewrite_one(idx: int, aug: AugmentedSample) -> None:
+        import time
+
+        has_thinking = bool(aug.thinking_text)
+        cache_key = hashlib.md5(
+            f"llm3:{aug.fen}:{aug.move_uci}:{has_thinking}".encode()
+        ).hexdigest()
+
+        if cache_key in coaching_cache:
+            entry = coaching_cache[cache_key]
+            results[idx] = dataclasses.replace(
+                aug,
+                coaching_text=entry["coaching"],
+                thinking_text=entry.get("thinking", aug.thinking_text),
+                tool_messages=entry.get("tool_messages", []),
+            )
+            done_count[0] += 1
+            logger.info("[%d/%d] cache hit: %s", done_count[0], len(samples), aug.move_san)
+            return
+
+        t0 = time.monotonic()
+        new_thinking, new_coaching, new_tool_messages = await _coach_one(
+            aug, client, llm_model, sf_pool, semaphore
+        )
+        elapsed = time.monotonic() - t0
+        n_tool_calls = len([m for m in new_tool_messages if m.get("role") == "assistant"])
+
+        if new_coaching:
+            results[idx] = dataclasses.replace(
+                aug,
+                coaching_text=new_coaching,
+                thinking_text=new_thinking,
+                tool_messages=new_tool_messages,
+            )
+            async with cache_lock:
+                if cache_file:
+                    entry_out: dict = {
+                        "_key": cache_key,
+                        "coaching": new_coaching,
+                        "tool_messages": new_tool_messages,
+                    }
+                    if new_thinking:
+                        entry_out["thinking"] = new_thinking
+                    cache_file.write(json.dumps(entry_out) + "\n")
+                    cache_file.flush()
+            done_count[0] += 1
+            logger.info(
+                "[%d/%d] %s → %d chars, %d tool calls (%.1fs)",
+                done_count[0],
+                len(samples),
+                aug.move_san,
+                len(new_coaching),
+                n_tool_calls,
+                elapsed,
+            )
+        else:
+            done_count[0] += 1
+            logger.warning(
+                "[%d/%d] empty coaching: %s %s (%.1fs)",
+                done_count[0],
+                len(samples),
+                aug.move_san,
+                aug.fen[:20],
+                elapsed,
+            )
+
+    logger.info(
+        "LLM coaching %d samples via %s (Stockfish tool enabled)",
+        len(samples),
+        llm_base_url,
+    )
+    await asyncio.gather(*[rewrite_one(i, s) for i, s in enumerate(samples)])
+
+    if cache_file:
+        cache_file.close()
+    await sf_pool.stop()
+
+    logger.info("LLM coaching complete")
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Final formatting
 # ---------------------------------------------------------------------------
 
@@ -760,6 +1177,7 @@ def format_training_sample(aug: AugmentedSample) -> dict:
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
+            *aug.tool_messages,
             {"role": "assistant", "content": assistant},
         ],
         "metadata": {
@@ -839,6 +1257,9 @@ async def run_pipeline(
     textbook_path: Path | None = None,
     skip_augment: bool = False,
     workers: int = 4,
+    llm_coach: bool = False,
+    llm_base_url: str = "http://localhost:8100/v1",
+    llm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
 ) -> None:
     """Run the full extract → augment → format pipeline."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -899,6 +1320,17 @@ async def run_pipeline(
             workers=workers,
         )
 
+    # Phase 2.5: LLM coaching generation (optional)
+    if llm_coach:
+        llm_cache = output_dir / ".llm_coaching_cache.jsonl"
+        augmented = await generate_coaching_with_llm(
+            augmented,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            stockfish_path=stockfish_path,
+            cache_path=llm_cache,
+        )
+
     # Phase 3: Format and split
     logger.info("=== Phase 3: Format & Split ===")
     deduped = dedup_samples(augmented)
@@ -955,6 +1387,23 @@ def main() -> None:
         default=4,
         help="Number of parallel Stockfish workers (default: 4)",
     )
+    parser.add_argument(
+        "--llm-coach",
+        action="store_true",
+        help="Use local vLLM to generate coaching text for chess_cot samples",
+    )
+    parser.add_argument(
+        "--llm-url",
+        type=str,
+        default="http://localhost:8100/v1",
+        help="vLLM OpenAI-compatible base URL (default: http://localhost:8100/v1)",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        help="Model name served by vLLM",
+    )
 
     args = parser.parse_args()
 
@@ -971,6 +1420,9 @@ def main() -> None:
             textbook_path=args.textbook_path,
             skip_augment=args.skip_augment,
             workers=args.workers,
+            llm_coach=args.llm_coach,
+            llm_base_url=args.llm_url,
+            llm_model=args.llm_model,
         )
     )
 
