@@ -369,182 +369,53 @@ async def download_pgnmentor(
 
 
 # ---------------------------------------------------------------------------
-# Lichess studies downloader
+# Lichess studies downloader (via Icannos HuggingFace CSV dataset)
 # ---------------------------------------------------------------------------
 
-# Instructive study topics to query
-LICHESS_STUDY_QUERIES = [
-    # Endgames
-    "rook endgame technique",
-    "king and pawn endgame",
-    "bishop endgame",
-    "knight endgame",
-    "queen endgame",
-    "pawn endgame theory",
-    "rook vs pawn",
-    "lucena philidor",
-    "zugzwang opposition",
-    # Tactics
-    "tactical patterns fork pin skewer",
-    "discovered attack back rank mate",
-    "sacrifice combination chess",
-    "deflection decoy chess tactics",
-    # Strategy
-    "pawn structure strategy",
-    "isolated queen pawn",
-    "passed pawn",
-    "good bishop bad bishop",
-    "open file rook",
-    "outpost knight",
-    "minority attack majority",
-    "prophylaxis restriction",
-    # Openings
-    "opening principles development",
-    "sicilian defense theory",
-    "french defense strategy",
-    "caro kann theory",
-    "king indian defense",
-    "queen gambit declined",
-    "ruy lopez theory",
-    "english opening",
-    "nimzo indian theory",
-    "queens gambit",
-    # Other
-    "checkmate patterns",
-    "chess fundamentals beginners",
-    "middlegame planning",
-    "chess strategy masterclass",
-    "endgame studies puzzles",
+# The Lichess search API (/api/study/search) is no longer available.
+# We use the Icannos/chess_studies HuggingFace dataset which contains
+# full PGN text for thousands of annotated Lichess studies.
+ICANNOS_CSV_URLS = [
+    "https://huggingface.co/datasets/Icannos/chess_studies/resolve/main/lichess_studies.csv",
+    "https://huggingface.co/datasets/Icannos/chess_studies/resolve/main/others.csv",
 ]
-
-# Well-known Lichess users who publish instructional studies
-LICHESS_STUDY_AUTHORS = [
-    "chessbrah",
-    "penguingm1",
-    "GMHikaruOnTwitch",
-    "danya_chess",
-    "Saint_Lazarus",
-    "thechesswebsite",
-    "ChessNetwork",
-]
-
-# Hand-picked high-quality study IDs (Lichess public studies)
-LICHESS_STUDY_IDS_SEED = [
-    "4Km7XB3Y",  # Endgame fundamentals
-    "7CL38Nfz",  # Rook endgames
-    "GlpFoAMX",  # Pawn endgames
-    "Yl7FDSEl",  # Common pawn structures
-    "PqMfUgLT",  # Chess tactics course
-]
-
-
-async def _search_lichess_studies(
-    client: httpx.AsyncClient,
-    query: str,
-    nb: int = 20,
-) -> list[str]:
-    """Return study IDs matching query."""
-    try:
-        resp = await client.get(
-            "https://lichess.org/api/study/search",
-            params={"q": query, "nb": nb},
-            timeout=15.0,
-        )
-        if resp.status_code != 200:
-            return []
-        ids = []
-        for line in resp.text.splitlines():
-            if line.strip():
-                try:
-                    obj = json.loads(line)
-                    if "id" in obj:
-                        ids.append(obj["id"])
-                except json.JSONDecodeError:
-                    pass
-        return ids
-    except Exception:
-        return []
-
-
-async def _fetch_lichess_study(
-    client: httpx.AsyncClient,
-    study_id: str,
-    semaphore: asyncio.Semaphore,
-) -> str | None:
-    """Fetch a Lichess study as PGN."""
-    async with semaphore:
-        try:
-            resp = await client.get(
-                f"https://lichess.org/api/study/{study_id}.pgn",
-                timeout=30.0,
-            )
-            if resp.status_code == 200:
-                return resp.text
-            return None
-        except Exception:
-            return None
-
-
-async def _fetch_lichess_author_studies(
-    client: httpx.AsyncClient,
-    username: str,
-    semaphore: asyncio.Semaphore,
-) -> str | None:
-    """Fetch all studies by a Lichess user as bulk PGN."""
-    async with semaphore:
-        try:
-            resp = await client.get(
-                f"https://lichess.org/api/study/by/{username}.pgn",
-                timeout=60.0,
-            )
-            if resp.status_code == 200:
-                return resp.text
-            return None
-        except Exception:
-            return None
 
 
 async def download_lichess_studies(
     workers: int = 8,
 ) -> list[tuple[str, str]]:
-    """Return list of (label, pgn_text) from Lichess studies."""
-    semaphore = asyncio.Semaphore(workers)
+    """Return list of (label, pgn_text) from Icannos Lichess study CSVs."""
+    import csv
+
     results: list[tuple[str, str]] = []
 
     async with httpx.AsyncClient(
         headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         },
-        timeout=60.0,
+        timeout=180.0,
+        follow_redirects=True,
     ) as client:
-        # 1. Collect study IDs via search
-        logger.info("Searching Lichess studies (%d queries)...", len(LICHESS_STUDY_QUERIES))
-        search_tasks = [_search_lichess_studies(client, q, nb=30) for q in LICHESS_STUDY_QUERIES]
-        search_results = await asyncio.gather(*search_tasks)
-        all_ids: set[str] = set(LICHESS_STUDY_IDS_SEED)
-        for ids in search_results:
-            all_ids.update(ids)
-        logger.info("Found %d unique study IDs", len(all_ids))
+        for url in ICANNOS_CSV_URLS:
+            csv_name = url.split("/")[-1].replace(".csv", "")
+            logger.info("Downloading Icannos CSV: %s ...", url.split("/")[-1])
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            except Exception as e:
+                logger.warning("Failed to fetch %s: %s", url, e)
+                continue
 
-        # 2. Fetch each study
-        fetch_tasks = [_fetch_lichess_study(client, sid, semaphore) for sid in all_ids]
-        pgns = await asyncio.gather(*fetch_tasks)
-        for sid, pgn in zip(all_ids, pgns):
-            if pgn:
-                results.append((f"lichess_study_{sid}", pgn))
-            await asyncio.sleep(0.05)  # gentle rate limit
+            reader = csv.DictReader(io.StringIO(resp.text))
+            row_count = 0
+            for row in reader:
+                pgn_text = row.get("text", "").strip()
+                if pgn_text:
+                    results.append((f"lichess_{csv_name}_{row_count}", pgn_text))
+                    row_count += 1
+            logger.info("  %s: %d PGN entries loaded", csv_name, row_count)
 
-        # 3. Fetch author studies
-        logger.info("Fetching studies from %d authors...", len(LICHESS_STUDY_AUTHORS))
-        author_tasks = [
-            _fetch_lichess_author_studies(client, user, semaphore) for user in LICHESS_STUDY_AUTHORS
-        ]
-        author_pgns = await asyncio.gather(*author_tasks)
-        for user, pgn in zip(LICHESS_STUDY_AUTHORS, author_pgns):
-            if pgn:
-                results.append((f"lichess_author_{user}", pgn))
-
-    logger.info("Downloaded %d Lichess study PGN collections", len(results))
+    logger.info("Loaded %d Lichess study PGN entries from Icannos CSVs", len(results))
     return results
 
 
