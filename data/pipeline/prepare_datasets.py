@@ -1391,20 +1391,32 @@ async def run_pipeline(
     llm_coach: bool = False,
     llm_base_url: str = "http://localhost:8100/v1",
     llm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+    only_sources: list[str] | None = None,
 ) -> None:
-    """Run the full extract → augment → format pipeline."""
+    """Run the full extract → augment → format pipeline.
+
+    Args:
+        only_sources: If set, only run transformers whose source name is in
+            this list. Valid values: chess_cot, icannos, jaisonkumar, textbook.
+            Default (None) runs all available transformers.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _want(source: str) -> bool:
+        return only_sources is None or source in only_sources
 
     # Phase 1: Extract
     logger.info("=== Phase 1: Extract ===")
     all_raw: list[RawSample] = []
 
-    transformers: list[BaseTransformer] = [
-        ChessCotTransformer(),
-        IcannosTransformer(),
-        JaisonkumarTransformer(),
-    ]
-    if textbook_path:
+    transformers: list[BaseTransformer] = []
+    if _want("chess_cot"):
+        transformers.append(ChessCotTransformer())
+    if _want("icannos"):
+        transformers.append(IcannosTransformer())
+    if _want("jaisonkumar"):
+        transformers.append(JaisonkumarTransformer())
+    if textbook_path and _want("textbook"):
         transformers.append(TextbookTransformer(textbook_path))
 
     for tx in transformers:
@@ -1536,12 +1548,28 @@ def main() -> None:
         default="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         help="Model name served by vLLM",
     )
+    parser.add_argument(
+        "--only-sources",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of sources to process. "
+            "Valid: chess_cot,icannos,jaisonkumar,textbook. "
+            "Default: all sources."
+        ),
+    )
 
     args = parser.parse_args()
 
     stockfish_path = args.stockfish or __import__("os").environ.get("STOCKFISH_PATH", "")
     if not stockfish_path and not args.skip_augment:
         parser.error("--stockfish or STOCKFISH_PATH required unless --skip-augment is set")
+
+    only_sources = (
+        [s.strip() for s in args.only_sources.split(",") if s.strip()]
+        if args.only_sources
+        else None
+    )
 
     asyncio.run(
         run_pipeline(
@@ -1555,6 +1583,7 @@ def main() -> None:
             llm_coach=args.llm_coach,
             llm_base_url=args.llm_url,
             llm_model=args.llm_model,
+            only_sources=only_sources,
         )
     )
 
