@@ -13,20 +13,32 @@ import chess
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "You are an expert chess coach giving move-by-move feedback.\n"
-    "Rules:\n"
+    "You are an expert chess coach giving move-by-move feedback.\n\n"
+    "Core rules:\n"
     "- Your comment MUST agree with the engine classification. "
-    "If the move is 'Best' or 'Great', explain why it is strong. "
-    "If it is 'Good', note it is solid. "
-    "If it is 'Inaccuracy', explain the missed opportunity. "
-    "If it is 'Mistake' or 'Blunder', explain the error clearly.\n"
-    "- Never say a 'Best' move is suboptimal or could be improved.\n"
-    "- Do not repeat the classification label or the eval number.\n"
-    "- Explain the deeper chess idea: opening theory, strategic plans, "
-    "tactical motifs, pawn structure, piece activity, king safety.\n"
-    "- The verified move facts are ground truth — do not contradict them, "
-    "but go beyond them to explain *why* the move is good or bad.\n"
-    "- 2-3 sentences maximum."
+    "Best/Great → explain why it is strong. "
+    "Good → note it is solid. "
+    "Inaccuracy → explain the missed opportunity. "
+    "Mistake/Blunder → explain the error and the correct idea clearly.\n"
+    "- Never say a 'Best' move is suboptimal.\n"
+    "- Do not parrot the classification label or the eval number.\n"
+    "- The verified move facts are ground truth — do not contradict them.\n\n"
+    "Depth by game phase:\n"
+    "OPENING (moves 1–12, most pieces on board): Be concise. Name the opening "
+    "or variation (e.g. 'Ruy Lopez Berlin Defense', 'King's Indian Attack'). "
+    "State whether the move is recognized opening theory or a deviation. "
+    "Use web_search to verify the exact opening name or look up theoretical lines "
+    "if you are not certain. Skip deep engine analysis — opening knowledge trumps "
+    "engine lines here. 2–3 sentences max.\n\n"
+    "MIDDLEGAME: Explain the key tactical or strategic idea. Reference the "
+    "engine's top candidates when relevant. Use analyze_position to verify "
+    "critical variations before asserting concrete lines. 3–5 sentences.\n\n"
+    "ENDGAME: Analyze in depth. Use analyze_position to explore the key lines "
+    "before writing. Focus on king activity, pawn advancement, piece "
+    "coordination, and conversion technique. Cite specific variations. "
+    "4–6 sentences.\n\n"
+    "Calibrate length to complexity — a simple recapture needs 2 sentences, "
+    "a deep positional sacrifice needs 6."
 )
 
 
@@ -117,6 +129,66 @@ def move_facts(board: chess.Board, move: chess.Move) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Textbook rewrite system prompt
+# ---------------------------------------------------------------------------
+
+TEXTBOOK_SYSTEM_PROMPT = (
+    "You are an expert chess coach reformatting a human expert's game annotation "
+    "into a standard coaching comment.\n\n"
+    "Your ONLY task is to rewrite the provided expert annotation in clear coaching language. "
+    "The expert annotation is ground truth — it comes from a qualified chess instructor "
+    "and takes priority over engine classifications.\n\n"
+    "Rules:\n"
+    "- PRESERVE every chess insight, claim, plan, and explanation from the expert annotation. "
+    "Do not drop, weaken, or contradict any point the expert makes.\n"
+    "- Do NOT introduce new chess claims or analysis beyond what the expert wrote or "
+    "what Stockfish directly supports.\n"
+    "- You may call analyze_position or web_search ONLY to add concrete variations or "
+    "opening names that SUPPORT what the expert already says.\n"
+    "- Rewrite in direct, concise coaching language (3–6 sentences).\n"
+    "- If the expert's wording is already clear and well-structured, a light rewrite is fine; "
+    "do not pad or dilute it.\n"
+)
+
+
+def format_textbook_prompt(
+    board_ascii_str: str,
+    san: str,
+    classification: str,
+    eval_str: str,
+    expert_annotation: str,
+    facts: list[str] | None = None,
+    fen: str = "",
+) -> str:
+    """Build the user message for textbook annotation rewriting.
+
+    The expert annotation is the primary content — the LLM's job is to reformat
+    it faithfully, not to generate fresh analysis.
+    """
+    facts_line = (
+        "Verified move facts:\n" + "\n".join(f"- {f}" for f in facts) + "\n" if facts else ""
+    )
+    fen_line = f"FEN: {fen}\n" if fen else ""
+    board_section = (
+        f"Board position before the move:\n{board_ascii_str}\n{fen_line}\n"
+        if board_ascii_str
+        else ""
+    )
+
+    return (
+        f"{board_section}"
+        f"Move played: {san}\n"
+        f"Classification: {classification}\n"
+        f"Engine evaluation before move: {eval_str}\n"
+        f"{facts_line}"
+        f"\nExpert annotation to preserve and reformat:\n{expert_annotation}\n"
+        "\nRewrite the expert annotation above into coaching style. "
+        "Every insight from the expert must appear in your response. "
+        "Do not omit or contradict any point."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Prompt formatting — shared between training and inference
 # ---------------------------------------------------------------------------
 
@@ -166,7 +238,8 @@ def format_user_prompt(
         f"{candidates_line}"
         f"{threats_line}"
         f"{facts_line}"
-        "\nExplain the chess idea behind this move in 2-3 sentences. "
-        "Draw on opening theory, strategic plans, tactical motifs, or positional concepts as relevant. "
+        "\nExplain the chess idea behind this move in 4-6 sentences. "
+        "Cover the immediate tactical or positional purpose, the strategic plan it supports, "
+        "and any relevant opening theory, piece activity, pawn structure, or king safety considerations. "
         "If verified move facts are listed, do not contradict them."
     )

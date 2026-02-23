@@ -35,7 +35,14 @@ import chess.pgn
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from chess_mcp.stockfish import Stockfish
-from tutor.prompts import SYSTEM_PROMPT, board_ascii, format_user_prompt, move_facts
+from tutor.prompts import (
+    SYSTEM_PROMPT,
+    TEXTBOOK_SYSTEM_PROMPT,
+    board_ascii,
+    format_textbook_prompt,
+    format_user_prompt,
+    move_facts,
+)
 from tutor.tools import CHESS_TOOLS
 from tutor.tools import web_search as _web_search
 
@@ -878,56 +885,84 @@ async def _coach_one(
 
     board = chess.Board(aug.fen)
     facts = move_facts(board, chess.Move.from_uci(aug.move_uci))
-    user_msg = format_user_prompt(
-        board_ascii_str=board_ascii(board),
-        san=aug.move_san,
-        classification=aug.classification,
-        eval_str=aug.eval_str,
-        best_move=aug.best_move_san,
-        cp_loss=aug.cp_loss,
-        candidates=aug.candidates,
-        opponent_threats=aug.opponent_threats,
-        facts=facts,
-        fen=aug.fen,
-    )
 
     # Compute the FEN after the move so the LLM can analyze the resulting position
     board_after = board.copy()
     board_after.push(chess.Move.from_uci(aug.move_uci))
     fen_after = board_after.fen()
-
-    # Phase-specific tool directive
     phase = _game_phase(aug.fen)
-    if phase == "opening":
-        tool_directive = (
-            "\n\nThis is an OPENING position. Focus on opening theory — name the "
-            "opening or variation and state whether this is a recognized book move "
-            "or a deviation. Use web_search to look up the exact opening name. "
-            "When calling web_search, include the FULL move sequence from move 1 in your "
-            "query, e.g. 'Ruy Lopez e4 e5 Nf3 Nc6 Bb5' — do NOT use FEN strings or "
-            "isolated moves like 'Bb5 theory'. "
-            "You do NOT need to call analyze_position unless the move is an "
-            "Inaccuracy/Mistake/Blunder and you want to show the correct continuation."
+
+    # Textbook samples: faithful rewrite — preserve all expert content
+    is_textbook = aug.source == "textbook" and bool(aug.coaching_text)
+    if is_textbook:
+        user_msg = format_textbook_prompt(
+            board_ascii_str=board_ascii(board),
+            san=aug.move_san,
+            classification=aug.classification,
+            eval_str=aug.eval_str,
+            expert_annotation=aug.coaching_text,
+            facts=facts,
+            fen=aug.fen,
         )
-    elif phase == "endgame":
-        tool_directive = (
-            f"\n\nThis is an ENDGAME position. You MUST call analyze_position to "
-            f"explore key variations before writing your comment. Analyze the "
-            f"position AFTER this move (FEN = {fen_after}) and compare with the "
-            f"best alternative (FEN = {aug.fen}) to explain the winning or losing idea. "
-            f"Feel free to make multiple tool calls to trace concrete lines."
+        # For textbook: light tool directive — support the expert, don't override
+        if phase == "opening":
+            tool_directive = (
+                "\n\nIf the expert mentions a specific opening name or variation, "
+                "use web_search to confirm the exact name. Otherwise no tools are needed."
+            )
+        else:
+            tool_directive = (
+                f"\n\nIf the expert mentions a specific tactical or strategic line, "
+                f"you may call analyze_position (FEN = {fen_after}) to add a concrete "
+                f"variation that supports the expert's claim. Do not introduce unrelated analysis."
+            )
+        system_prompt = TEXTBOOK_SYSTEM_PROMPT
+    else:
+        user_msg = format_user_prompt(
+            board_ascii_str=board_ascii(board),
+            san=aug.move_san,
+            classification=aug.classification,
+            eval_str=aug.eval_str,
+            best_move=aug.best_move_san,
+            cp_loss=aug.cp_loss,
+            candidates=aug.candidates,
+            opponent_threats=aug.opponent_threats,
+            facts=facts,
+            fen=aug.fen,
         )
-    else:  # middlegame
-        tool_directive = (
-            f"\n\nThis is a MIDDLEGAME position. Call analyze_position to verify "
-            f"the key tactical or strategic lines before commenting. "
-            f"Start by analyzing the position AFTER this move (FEN = {fen_after}). "
-            f"You may also analyze before the move (FEN = {aug.fen}) to compare alternatives."
-        )
+        # Phase-specific tool directive
+        if phase == "opening":
+            tool_directive = (
+                "\n\nThis is an OPENING position. Focus on opening theory — name the "
+                "opening or variation and state whether this is a recognized book move "
+                "or a deviation. Use web_search to look up the exact opening name. "
+                "When calling web_search, include the FULL move sequence from move 1 in your "
+                "query, e.g. 'Ruy Lopez e4 e5 Nf3 Nc6 Bb5' — do NOT use FEN strings or "
+                "isolated moves like 'Bb5 theory'. "
+                "You do NOT need to call analyze_position unless the move is an "
+                "Inaccuracy/Mistake/Blunder and you want to show the correct continuation."
+            )
+        elif phase == "endgame":
+            tool_directive = (
+                f"\n\nThis is an ENDGAME position. You MUST call analyze_position to "
+                f"explore key variations before writing your comment. Analyze the "
+                f"position AFTER this move (FEN = {fen_after}) and compare with the "
+                f"best alternative (FEN = {aug.fen}) to explain the winning or losing idea. "
+                f"Feel free to make multiple tool calls to trace concrete lines."
+            )
+        else:  # middlegame
+            tool_directive = (
+                f"\n\nThis is a MIDDLEGAME position. Call analyze_position to verify "
+                f"the key tactical or strategic lines before commenting. "
+                f"Start by analyzing the position AFTER this move (FEN = {fen_after}). "
+                f"You may also analyze before the move (FEN = {aug.fen}) to compare alternatives."
+            )
+        system_prompt = SYSTEM_PROMPT
+
     user_msg_with_directive = user_msg + tool_directive
 
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg_with_directive},
     ]
     tool_trace: list[str] = []

@@ -246,17 +246,6 @@ def _parse_pgn_annotations(
         games_parsed += 1
         board = game.board()
         count = 0
-
-        # Build a source label from game headers — skip if headers are unknown
-        event = game.headers.get("Event", "")
-        white = game.headers.get("White", "")
-        black = game.headers.get("Black", "")
-        year = game.headers.get("Date", "")[:4]
-        # Skip games with missing/placeholder headers
-        if "?" in (white + black + event) or not (white or black or event):
-            continue
-        game_label = f"{white} vs {black}, {event} {year}".strip(", ")
-
         node = game
         while node.variations:
             next_node = node.variations[0]
@@ -284,23 +273,6 @@ def _parse_pgn_annotations(
                 count += 1
                 if count >= max_per_game:
                     break
-            elif not annotation and game_label:
-                # Unannotated: emit with context placeholder so LLM coach rewrites it
-                # Only for games with recognizable context (events, known players)
-                if event and (white or black):
-                    annotation = f"This move was played in {game_label}."
-                    concepts = []
-                    yield AnnotatedPosition(
-                        fen=fen_before,
-                        move_uci=move.uci(),
-                        move_san=san,
-                        annotation=annotation,
-                        concepts=concepts,
-                        source=source,
-                    )
-                    count += 1
-                    if count >= max_per_game:
-                        break
 
             board.push(move)
             node = next_node
