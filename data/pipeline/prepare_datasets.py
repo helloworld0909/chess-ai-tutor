@@ -452,6 +452,102 @@ class IcannosTransformer(BaseTransformer):
         logger.info("icannos: extracted %d samples", count)
 
 
+class JaisonkumarTransformer(BaseTransformer):
+    """Transform Jaisonkumar/chess-annotation-dataset into coaching samples.
+
+    365K rows of classical chess literature annotations (books, magazines,
+    historical game collections) paired with FEN+move.  ~75K rows are English
+    quality.  Treated as expert annotations (textbook path in _coach_one).
+    """
+
+    DATASET_NAME = "Jaisonkumar/chess-annotation-dataset"
+
+    # English language heuristic — require at least 3 of these common words
+    _ENGLISH_WORDS = frozenset(
+        [
+            "the",
+            "this",
+            "is",
+            "and",
+            "move",
+            "play",
+            "better",
+            "because",
+            "white",
+            "black",
+            "pawn",
+            "rook",
+            "knight",
+            "bishop",
+            "queen",
+            "king",
+            "attack",
+            "defend",
+            "position",
+            "opening",
+            "endgame",
+            "piece",
+            "square",
+            "game",
+        ]
+    )
+
+    def _is_english(self, text: str) -> bool:
+        lower = text.lower()
+        return sum(1 for w in self._ENGLISH_WORDS if w in lower) >= 3
+
+    def extract(self, max_samples: int = 0) -> Iterator[RawSample]:
+        import chess
+        from datasets import load_dataset
+
+        logger.info("Loading %s...", self.DATASET_NAME)
+        ds = load_dataset(self.DATASET_NAME, split="train")
+
+        count = 0
+        for row in ds:
+            if max_samples and count >= max_samples:
+                break
+
+            annotation = (row.get("output") or "").strip()
+            inp = (row.get("input") or "").strip()
+
+            if not annotation or not inp:
+                continue
+
+            # Parse "FEN: <fen>\nMove: <san>"
+            fen_m = re.search(r"FEN:\s*(.+?)(?:\n|$)", inp)
+            move_m = re.search(r"Move:\s*(\S+)", inp)
+            if not fen_m or not move_m:
+                continue
+
+            fen = fen_m.group(1).strip()
+            move_san = move_m.group(1).strip()
+
+            try:
+                board = chess.Board(fen)
+                move = board.parse_san(move_san)
+                move_uci = move.uci()
+            except Exception:
+                continue
+
+            if not self._is_english(annotation):
+                continue
+            if not self._is_quality(annotation):
+                continue
+
+            yield RawSample(
+                fen=fen,
+                move_uci=move_uci,
+                move_san=move_san,
+                coaching_text=annotation,
+                thinking_text="",
+                source="jaisonkumar",
+            )
+            count += 1
+
+        logger.info("jaisonkumar: extracted %d samples", count)
+
+
 class TextbookTransformer(BaseTransformer):
     """Transform existing augmented.jsonl from the textbook pipeline."""
 
@@ -893,7 +989,7 @@ async def _coach_one(
     phase = _game_phase(aug.fen)
 
     # Textbook samples: faithful rewrite — preserve all expert content
-    is_textbook = aug.source == "textbook" and bool(aug.coaching_text)
+    is_textbook = aug.source in ("textbook", "jaisonkumar") and bool(aug.coaching_text)
     if is_textbook:
         user_msg = format_textbook_prompt(
             board_ascii_str=board_ascii(board),
@@ -1306,6 +1402,7 @@ async def run_pipeline(
     transformers: list[BaseTransformer] = [
         ChessCotTransformer(),
         IcannosTransformer(),
+        JaisonkumarTransformer(),
     ]
     if textbook_path:
         transformers.append(TextbookTransformer(textbook_path))

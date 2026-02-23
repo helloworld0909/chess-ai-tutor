@@ -345,11 +345,64 @@ async def download_pgnmentor(
 # ---------------------------------------------------------------------------
 
 # The Lichess search API (/api/study/search) is no longer available.
-# We use the Icannos/chess_studies HuggingFace dataset which contains
-# full PGN text for thousands of annotated Lichess studies.
+# We use two complementary sources:
+#   1. Icannos/chess_studies HuggingFace CSV dataset (curated subset)
+#   2. Direct /api/study/by/{username} fetch for known educational accounts
 ICANNOS_CSV_URLS = [
     "https://huggingface.co/datasets/Icannos/chess_studies/resolve/main/lichess_studies.csv",
     "https://huggingface.co/datasets/Icannos/chess_studies/resolve/main/others.csv",
+]
+
+# Lichess usernames known for publishing high-quality instructional studies.
+# Wrong/inactive usernames are safe — the API returns empty content, not an error.
+LICHESS_STUDY_AUTHORS = [
+    # Streamers / prominent content creators
+    "chessbrah",
+    "penguingm1",
+    "GMHikaruOnTwitch",
+    "danya_chess",
+    "thechesswebsite",
+    "ChessNetwork",
+    "imrosen",
+    "Saint_Lazarus",
+    "GothamChess",
+    "BotezLive",
+    "AnishOnline",
+    "nihalsarin2004",
+    "DrDrunkenstein",
+    "MagnusCarlsen",
+    # Coaches / study authors widely cited on Lichess forums
+    "chess-teacher",
+    "lovlas",
+    "thibault",
+    "niklasf",
+    "CoachJon",
+    "Avetik_Grigoryan",
+    "GMBenjamin",
+    "GMSmith",
+    "IM_Sagar",
+    "chess_tempo",
+    "yusupov",
+    "karteek",
+    "kasa_bova",
+    "LuckyLooks",
+    "VladimirKramnik",
+    "MVL",
+    "FabianoCaruana",
+    "RichardReti",
+    "LeninVarela",
+    "GM_Illingworth",
+    "pepellou",
+    "PinkedMink",
+    "Mastertan",
+    "CalavitoMasters",
+    "Chessy_Cat",
+    "NimzoRoy",
+    "EndgameStudent",
+    "LevonAronian",
+    "FinnegansWake",
+    "ChessOpenings101",
+    "Pyrrhox",
 ]
 
 
@@ -391,6 +444,56 @@ async def download_lichess_studies(
     return results
 
 
+async def _fetch_lichess_author_studies(
+    client: httpx.AsyncClient,
+    username: str,
+    semaphore: asyncio.Semaphore,
+) -> tuple[str, str | None]:
+    """Fetch all public studies for a Lichess user as bulk PGN."""
+    async with semaphore:
+        try:
+            resp = await client.get(
+                f"https://lichess.org/api/study/by/{username}.pgn",
+                timeout=120.0,
+            )
+            if resp.status_code == 200 and resp.text.strip():
+                return username, resp.text
+            return username, None
+        except Exception as e:
+            logger.warning("lichess author %s: %s", username, e)
+            return username, None
+
+
+async def download_lichess_author_studies(workers: int = 4) -> list[tuple[str, str]]:
+    """Fetch all public studies from LICHESS_STUDY_AUTHORS via /api/study/by/{user}."""
+    semaphore = asyncio.Semaphore(workers)
+    results: list[tuple[str, str]] = []
+
+    async with httpx.AsyncClient(
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        },
+        timeout=180.0,
+        follow_redirects=True,
+    ) as client:
+        tasks = [
+            _fetch_lichess_author_studies(client, user, semaphore) for user in LICHESS_STUDY_AUTHORS
+        ]
+        raw = await asyncio.gather(*tasks)
+
+    for username, pgn in raw:
+        if pgn:
+            results.append((f"lichess_author_{username}", pgn))
+            logger.info("  %s: fetched", username)
+
+    logger.info(
+        "Fetched studies from %d / %d Lichess authors",
+        len(results),
+        len(LICHESS_STUDY_AUTHORS),
+    )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -401,6 +504,7 @@ async def build(
     pgnmentor_workers: int = 12,
     lichess_workers: int = 8,
     max_positions_per_file: int = 500,
+    skip_pgnmentor: bool = False,
 ) -> None:
     """Run full textbook data collection pipeline."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,9 +561,28 @@ async def build(
             logger.info("  %s → %d positions", label, n)
             total_written += n
 
-    logger.info("After Lichess: %d total positions", total_written)
+    logger.info("After Lichess CSV: %d total positions", total_written)
 
-    # ---- Phase 2: PGN Mentor ----
+    # ---- Phase 1b: Lichess author studies ----
+    logger.info(
+        "=== Phase 1b: Lichess Author Studies (%d accounts) ===", len(LICHESS_STUDY_AUTHORS)
+    )
+    author_collections = await download_lichess_author_studies(workers=max(1, lichess_workers // 2))
+    for label, pgn_text in author_collections:
+        positions = list(_parse_pgn_annotations(pgn_text, source=label))
+        n = write_positions(positions)
+        if n:
+            logger.info("  %s → %d positions", label, n)
+            total_written += n
+
+    logger.info("After author studies: %d total positions", total_written)
+
+    # ---- Phase 2: PGN Mentor (rarely annotated — skip by default) ----
+    if skip_pgnmentor:
+        logger.info("=== Phase 2: PGN Mentor skipped ===")
+        out.close()
+        logger.info("=== Done: %d total positions in %s ===", total_written, output_path)
+        return
     logger.info("=== Phase 2: PGN Mentor (%d files) ===", 0)
 
     # Load the full file list
@@ -529,6 +652,18 @@ def main() -> None:
     parser.add_argument(
         "--max-per-file", type=int, default=500, help="Max positions extracted per PGN file"
     )
+    parser.add_argument(
+        "--skip-pgnmentor",
+        action="store_true",
+        default=True,
+        help="Skip PGN Mentor phase (default: True — PGN Mentor games are rarely annotated)",
+    )
+    parser.add_argument(
+        "--pgnmentor",
+        dest="skip_pgnmentor",
+        action="store_false",
+        help="Enable PGN Mentor phase",
+    )
     args = parser.parse_args()
 
     asyncio.run(
@@ -537,6 +672,7 @@ def main() -> None:
             pgnmentor_workers=args.workers,
             lichess_workers=min(args.workers, 8),
             max_positions_per_file=args.max_per_file,
+            skip_pgnmentor=args.skip_pgnmentor,
         )
     )
 
