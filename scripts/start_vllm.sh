@@ -9,7 +9,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR/docker"
 
 echo "Starting vLLM server..."
-echo "Model: Qwen/Qwen3-VL-30B-A3B"
+echo "Model: Qwen/Qwen3-30B-A3B-Thinking-2507-FP8"
 echo "Port: 8100"
 echo ""
 

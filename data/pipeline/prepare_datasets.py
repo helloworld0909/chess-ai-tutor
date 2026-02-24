@@ -988,7 +988,9 @@ async def _coach_one(
     fen_after = board_after.fen()
     phase = _game_phase(aug.fen)
 
-    # Textbook samples: faithful rewrite — preserve all expert content
+    # Textbook samples: single direct rephrase call — no tools, no fact injection.
+    # Facts are excluded to prevent the LLM from overriding the expert's stated reasoning
+    # with mechanical observations that may be true but irrelevant to the expert's point.
     is_textbook = aug.source in ("textbook", "jaisonkumar") and bool(aug.coaching_text)
     if is_textbook:
         user_msg = format_textbook_prompt(
@@ -997,22 +999,33 @@ async def _coach_one(
             classification=aug.classification,
             eval_str=aug.eval_str,
             expert_annotation=aug.coaching_text,
-            facts=facts,
+            facts=None,  # expert annotation is ground truth; mechanical facts would override intent
             fen=aug.fen,
         )
-        # For textbook: light tool directive — support the expert, don't override
-        if phase == "opening":
-            tool_directive = (
-                "\n\nIf the expert mentions a specific opening name or variation, "
-                "use web_search to confirm the exact name. Otherwise no tools are needed."
-            )
-        else:
-            tool_directive = (
-                f"\n\nIf the expert mentions a specific tactical or strategic line, "
-                f"you may call analyze_position (FEN = {fen_after}) to add a concrete "
-                f"variation that supports the expert's claim. Do not introduce unrelated analysis."
-            )
-        system_prompt = TEXTBOOK_SYSTEM_PROMPT
+        messages = [
+            {"role": "system", "content": TEXTBOOK_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ]
+        async with semaphore:
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=llm_model,
+                        messages=messages,
+                        max_tokens=8192,
+                        temperature=0.7,
+                        extra_body={"chat_template_kwargs": {"thinking_budget": 2048}},
+                    ),
+                    timeout=120.0,
+                )
+            except Exception as e:
+                logger.warning("LLM textbook error for %s %s: %s", aug.move_san, aug.fen[:20], e)
+                return aug.thinking_text, aug.coaching_text, []
+        msg = resp.choices[0].message
+        lm_thinking, text = _strip_thinking((msg.content or "").strip())
+        if not text:
+            return aug.thinking_text, aug.coaching_text, []
+        return lm_thinking, text, []
     else:
         user_msg = format_user_prompt(
             board_ascii_str=board_ascii(board),
@@ -1188,9 +1201,15 @@ async def generate_coaching_with_llm(
         import time
 
         has_thinking = bool(aug.thinking_text)
-        cache_key = hashlib.md5(
-            f"llm3:{aug.fen}:{aug.move_uci}:{has_thinking}".encode()
-        ).hexdigest()
+        # Textbook uses a separate version key so fixes to the textbook prompt
+        # invalidate only textbook cache entries, leaving chess_cot/icannos intact.
+        is_tb = aug.source in ("textbook", "jaisonkumar")
+        key_str = (
+            f"llm5:{aug.source}:{aug.fen}:{aug.move_uci}:{has_thinking}"
+            if is_tb
+            else f"llm3:{aug.fen}:{aug.move_uci}:{has_thinking}"
+        )
+        cache_key = hashlib.md5(key_str.encode()).hexdigest()
 
         if cache_key in coaching_cache:
             entry = coaching_cache[cache_key]

@@ -28,6 +28,8 @@ from tutor.prompts import (
     format_user_prompt,
     move_facts,
 )
+from tutor.tools import CHESS_TOOLS
+from tutor.tools import web_search as _web_search
 
 # Global state – populated by review.py before server starts
 _games: list[Any] = []
@@ -56,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _stockfish.start()
 
     llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8100/v1")
-    _llm_model = os.environ.get("LLM_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8")
+    _llm_model = os.environ.get("LLM_MODEL", "Qwen/Qwen3-30B-A3B-Thinking-2507-FP8")
     _llm_client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
 
     yield
@@ -180,13 +182,18 @@ async def _llm_comment(
     board_ascii_str: str = "",
     fen: str = "",
 ) -> tuple[str, str]:
-    """Get an AI-generated comment for a move.
+    """Get an AI-generated comment for a move using a tool-calling loop.
 
-    Returns:
-        Tuple of (comment text, source) where source is "llm" or "template".
+    The LLM can call analyze_position (via Stockfish) and web_search to ground
+    its comment before writing. Returns (comment text, source) where source is
+    "llm" or "template".
     """
     if _llm_client is None:
         return _generate_comment(san, classification, best_move, cp_loss == 0), "template"
+
+    import json as _json
+
+    import chess as _chess
 
     prompt = format_user_prompt(
         board_ascii_str=board_ascii_str,
@@ -209,23 +216,85 @@ async def _llm_comment(
         prompt,
     )
 
+    messages: list[Any] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+
     try:
-        response = await asyncio.wait_for(
-            _llm_client.chat.completions.create(
-                model=_llm_model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=150,
-                temperature=0.7,
-            ),
-            timeout=10.0,
-        )
-        text = response.choices[0].message.content or ""
-        text = _THINK_RE.sub("", text).strip()
-        if text:
-            return text, "llm"
+        for _ in range(6):  # up to 4 tool calls + 1 answer + 1 safety
+            response = await asyncio.wait_for(
+                _llm_client.chat.completions.create(
+                    model=_llm_model,
+                    messages=messages,  # type: ignore[arg-type]
+                    tools=CHESS_TOOLS,  # type: ignore[arg-type]
+                    tool_choice="auto",
+                    max_tokens=8192,
+                    temperature=0.7,
+                ),
+                timeout=300.0,
+            )
+            choice = response.choices[0]
+            msg = choice.message
+
+            if choice.finish_reason == "tool_calls" and msg.tool_calls:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in msg.tool_calls
+                        ],
+                    }
+                )
+                for tc in msg.tool_calls:
+                    try:
+                        args = _json.loads(tc.function.arguments)
+                        if tc.function.name == "web_search":
+                            result_str = await _web_search(args.get("query", ""))
+                        else:  # analyze_position
+                            if _stockfish is None:
+                                result_str = _json.dumps({"error": "Stockfish not ready"})
+                            else:
+                                board_q = _chess.Board(args.get("fen", fen))
+                                analysis = await _stockfish.analyze(
+                                    board_q.fen(),
+                                    depth=16,
+                                    multipv=min(int(args.get("multipv", 3)), 5),
+                                )
+                                result_str = _json.dumps(
+                                    {
+                                        "eval": _format_score(
+                                            analysis.score.mate_in
+                                            if analysis.score.mate_in is not None
+                                            else (analysis.score.centipawns or 0),
+                                            analysis.score.mate_in is not None,
+                                        ),
+                                        "lines": [
+                                            {"move": ln.best_move, "pv": ln.pv[:5]}
+                                            for ln in analysis.lines[:5]
+                                        ],
+                                    }
+                                )
+                    except Exception as e:
+                        result_str = _json.dumps({"error": str(e)})
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+                continue
+
+            # finish_reason == "stop" — extract coaching text
+            text = msg.content or ""
+            text = _THINK_RE.sub("", text).strip()
+            if text:
+                return text, "llm"
+            break
     except Exception:
         pass
 

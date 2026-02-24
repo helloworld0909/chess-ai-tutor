@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from chess_mcp.stockfish import Stockfish
 from tutor.llm_tools import CHESS_TOOLS, ChessToolHandler
 
-
 SYSTEM_PROMPT = """\
 You are a friendly chess tutor helping a student improve their game.
 
@@ -51,7 +50,7 @@ class ChessAgent:
         self,
         base_url: str = "http://localhost:8100/v1",
         api_key: str = "dummy",
-        model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        model: str = "Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
         stockfish_path: str | None = None,
         max_tool_rounds: int = 5,
     ):
@@ -71,9 +70,7 @@ class ChessAgent:
         self.stockfish = Stockfish(path=stockfish_path)
         self.tool_handler: ChessToolHandler | None = None
 
-        self.messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     async def start(self) -> None:
         """Start the agent (initialize Stockfish)."""
@@ -134,16 +131,16 @@ class ChessAgent:
                 function_args = json.loads(tool_call.function.arguments)  # type: ignore[union-attr]
 
                 # Execute the tool
-                result = await self.tool_handler.handle_tool_call(
-                    function_name, function_args
-                )
+                result = await self.tool_handler.handle_tool_call(function_name, function_args)
 
                 # Add tool result to messages
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
+                self.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    }
+                )
 
         # Max rounds reached, get final response without tools
         response = self.client.chat.completions.create(
@@ -170,7 +167,7 @@ async def main():
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("LLM_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"),
+        default=os.environ.get("LLM_MODEL", "zai-org/GLM-4.7-Flash"),
         help="Model name",
     )
     parser.add_argument(

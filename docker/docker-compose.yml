@@ -1,6 +1,6 @@
 services:
   vllm:
-    image: vllm/vllm-openai:v0.13.0
+    image: vllm/vllm-openai:latest-cu130
     container_name: chess-ai-vllm
     restart: on-failure
     ipc: host
@@ -13,13 +13,13 @@ services:
       - ~/.cache/flashinfer:/root/.cache/flashinfer
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
-      - VLLM_SERVER_DEV_MODE=1
       - CUDA_VISIBLE_DEVICES=0,1
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
     command: >
-      Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
-      --gpu-memory-utilization 0.87
+      Qwen/Qwen3-30B-A3B-Thinking-2507-FP8
+      --gpu-memory-utilization 0.88
       --max-model-len 32768
-      --kv-cache-dtype fp8
       --tensor-parallel-size 2
       --enable-chunked-prefill
       --enable-auto-tool-choice

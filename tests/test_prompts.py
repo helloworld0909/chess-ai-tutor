@@ -150,7 +150,9 @@ def test_format_user_prompt_ends_with_instruction():
         classification="Best",
         eval_str="+0.35",
     )
-    assert "2-3 sentences" in prompt
+    # Depth/length guidance now lives in SYSTEM_PROMPT (phase-aware); the user
+    # prompt still ends with a coaching instruction.
+    assert "chess idea" in prompt or "Explain" in prompt
 
 
 # ── SYSTEM_PROMPT ─────────────────────────────────────────────────────────────
