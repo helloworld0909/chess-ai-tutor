@@ -26,7 +26,7 @@ import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 import chess
 import chess.pgn
@@ -241,7 +241,7 @@ class ChessCotTransformer(BaseTransformer):
             if max_samples and count >= max_samples:
                 break
 
-            row: dict[str, Any] = dict(_row.items())
+            row: dict[str, Any] = cast(dict[str, Any], _row)
             # Filter by reward quality
             if row.get("reward", 0) < self.MIN_REWARD:
                 continue
