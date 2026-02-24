@@ -971,6 +971,21 @@ def _extract_comment(text: str) -> str:
     return remainder
 
 
+_STUB_RE = re.compile(r"^[.\s…\-_*]+$")  # only dots, spaces, dashes, etc.
+
+
+def _is_valid_coaching(text: str) -> bool:
+    """Return False for empty, SKIP, or placeholder stubs like '...'."""
+    stripped = text.strip()
+    if not stripped or stripped.upper() == "SKIP":
+        return False
+    if _STUB_RE.match(stripped):
+        return False
+    if len(stripped) < 20:  # too short to be a real coaching comment
+        return False
+    return True
+
+
 async def _dispatch_tool_call(tc: Any, aug_fen: str, sf_pool: Any) -> tuple[str, str]:
     """Execute a single tool call, return (result_json, trace_line)."""
     args = json.loads(tc.function.arguments)
@@ -1141,7 +1156,7 @@ async def _coach_one(
         raw = (msg.content or "").strip()
         lm_thinking, _ = _strip_thinking(raw)
         text = _extract_comment(raw)
-        if not text or text.strip().upper() == "SKIP":
+        if text.strip().upper() == "SKIP" or not _is_valid_coaching(text):
             return aug.thinking_text, None, []  # None signals: discard this sample
         return lm_thinking, text, []
     else:
@@ -1265,15 +1280,16 @@ async def _coach_one(
                 parts.append("[Engine exploration]\n" + "\n".join(tool_trace))
             thinking = "\n\n".join(parts)
 
-        if not text:
+        if not _is_valid_coaching(text):
             logger.warning(
-                "Empty coaching for %s %s after %d rounds (finish=%s, raw_len=%d)",
+                "Stub/empty coaching %r for %s %s after %d rounds (finish=%s)",
+                text[:40],
                 aug.move_san,
                 aug.fen[:20],
                 round_idx + 1,
                 choice.finish_reason,
-                len(msg.content or ""),
             )
+            text = ""
         return thinking, text, tool_turns
 
     logger.warning(
