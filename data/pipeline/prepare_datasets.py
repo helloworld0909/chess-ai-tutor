@@ -1043,7 +1043,6 @@ async def _coach_one(
     client: Any,  # AsyncOpenAI — imported lazily inside generate_coaching_with_llm
     llm_model: str,
     sf_pool: StockfishPool,
-    semaphore: asyncio.Semaphore,
 ) -> tuple[str, str | None, list[dict]]:
     """Run one sample through the agentic coaching loop.
 
@@ -1086,21 +1085,20 @@ async def _coach_one(
             *few_shot,
             {"role": "user", "content": user_msg},
         ]
-        async with semaphore:
-            try:
-                resp = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=llm_model,
-                        messages=messages,
-                        max_tokens=8192,
-                        temperature=0.7,
-                        extra_body={"chat_template_kwargs": {"thinking_budget": 2048}},
-                    ),
-                    timeout=120.0,
-                )
-            except Exception as e:
-                logger.warning("LLM textbook error for %s %s: %s", aug.move_san, aug.fen[:20], e)
-                return aug.thinking_text, aug.coaching_text, []
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=llm_model,
+                    messages=messages,
+                    max_tokens=8192,
+                    temperature=0.7,
+                    extra_body={"chat_template_kwargs": {"thinking_budget": 2048}},
+                ),
+                timeout=120.0,
+            )
+        except Exception as e:
+            logger.warning("LLM textbook error for %s %s: %s", aug.move_san, aug.fen[:20], e)
+            return aug.thinking_text, aug.coaching_text, []
         msg = resp.choices[0].message
         lm_thinking, text = _strip_thinking((msg.content or "").strip())
         if not text or text.strip().upper() == "SKIP":
@@ -1157,85 +1155,84 @@ async def _coach_one(
     ]
     tool_trace: list[str] = []
 
-    async with semaphore:
-        for round_idx in range(7):  # up to 5 tool calls + 1 final answer + 1 safety
-            try:
-                resp = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=llm_model,
-                        messages=messages,
-                        tools=CHESS_TOOLS,
-                        tool_choice="auto",
-                        max_tokens=8192,
-                        temperature=0.7,
-                        extra_body={"chat_template_kwargs": {"thinking_budget": 2048}},
-                    ),
-                    timeout=300.0,
-                )
-            except Exception as e:
-                logger.warning("LLM call error for %s %s: %s", aug.move_san, aug.fen[:20], e)
-                return aug.thinking_text, "", []
+    for round_idx in range(7):  # up to 5 tool calls + 1 final answer + 1 safety
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=llm_model,
+                    messages=messages,
+                    tools=CHESS_TOOLS,
+                    tool_choice="auto",
+                    max_tokens=8192,
+                    temperature=0.7,
+                    extra_body={"chat_template_kwargs": {"thinking_budget": 2048}},
+                ),
+                timeout=300.0,
+            )
+        except Exception as e:
+            logger.warning("LLM call error for %s %s: %s", aug.move_san, aug.fen[:20], e)
+            return aug.thinking_text, "", []
 
-            choice = resp.choices[0]
-            msg = choice.message
+        choice = resp.choices[0]
+        msg = choice.message
 
-            if choice.finish_reason == "tool_calls" and msg.tool_calls:
-                # Append assistant turn with tool_calls
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in msg.tool_calls
-                        ],
-                    }
-                )
-                for tc in msg.tool_calls:
-                    try:
-                        result_str, trace = await _dispatch_tool_call(tc, aug.fen, sf_pool)
-                        tool_trace.append(trace)
-                    except Exception as e:
-                        result_str = json.dumps({"error": str(e)})
-                        tool_trace.append(f"{tc.function.name} error: {e}")
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
-                continue  # back to LLM with tool results
+        if choice.finish_reason == "tool_calls" and msg.tool_calls:
+            # Append assistant turn with tool_calls
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                }
+            )
+            for tc in msg.tool_calls:
+                try:
+                    result_str, trace = await _dispatch_tool_call(tc, aug.fen, sf_pool)
+                    tool_trace.append(trace)
+                except Exception as e:
+                    result_str = json.dumps({"error": str(e)})
+                    tool_trace.append(f"{tc.function.name} error: {e}")
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+            continue  # back to LLM with tool results
 
-            # Final response — extract coaching text and tool turns
-            tool_turns = messages[2:]
-            lm_thinking, text = _strip_thinking((msg.content or "").strip())
+        # Final response — extract coaching text and tool turns
+        tool_turns = messages[2:]
+        lm_thinking, text = _strip_thinking((msg.content or "").strip())
 
-            if has_prior_thinking:
-                # chess_cot: discard LLM thinking, keep original reasoning
-                thinking = aug.thinking_text
-                if tool_trace:
-                    thinking += "\n\n[Engine exploration]\n" + "\n".join(tool_trace)
-            else:
-                # Icannos/textbook: use LLM thinking + tool trace
-                parts: list[str] = []
-                if lm_thinking:
-                    parts.append(lm_thinking)
-                if tool_trace:
-                    parts.append("[Engine exploration]\n" + "\n".join(tool_trace))
-                thinking = "\n\n".join(parts)
+        if has_prior_thinking:
+            # chess_cot: discard LLM thinking, keep original reasoning
+            thinking = aug.thinking_text
+            if tool_trace:
+                thinking += "\n\n[Engine exploration]\n" + "\n".join(tool_trace)
+        else:
+            # Icannos/textbook: use LLM thinking + tool trace
+            parts: list[str] = []
+            if lm_thinking:
+                parts.append(lm_thinking)
+            if tool_trace:
+                parts.append("[Engine exploration]\n" + "\n".join(tool_trace))
+            thinking = "\n\n".join(parts)
 
-            if not text:
-                logger.warning(
-                    "Empty coaching for %s %s after %d rounds (finish=%s, raw_len=%d)",
-                    aug.move_san,
-                    aug.fen[:20],
-                    round_idx + 1,
-                    choice.finish_reason,
-                    len(msg.content or ""),
-                )
-            return thinking, text, tool_turns
+        if not text:
+            logger.warning(
+                "Empty coaching for %s %s after %d rounds (finish=%s, raw_len=%d)",
+                aug.move_san,
+                aug.fen[:20],
+                round_idx + 1,
+                choice.finish_reason,
+                len(msg.content or ""),
+            )
+        return thinking, text, tool_turns
 
     logger.warning(
         "Loop exhausted (7 rounds) for %s %s — no final answer", aug.move_san, aug.fen[:20]
@@ -1249,7 +1246,7 @@ async def generate_coaching_with_llm(
     llm_model: str,
     stockfish_path: str,
     cache_path: Path | None = None,
-    concurrency: int = 8,
+    llm_workers: int = 64,
 ) -> list[AugmentedSample]:
     """Generate grounded coaching using an LLM agent with Stockfish tool use.
 
@@ -1267,13 +1264,12 @@ async def generate_coaching_with_llm(
             logger.info("LLM coaching cache: %d entries loaded", len(coaching_cache))
 
     client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
-    semaphore = asyncio.Semaphore(concurrency)
     cache_lock = asyncio.Lock()
     cache_file = open(cache_path, "a", encoding="utf-8") if cache_path else None
     done_count = [0]
 
-    # Stockfish pool for tool calls — one instance per concurrent LLM request
-    sf_pool = StockfishPool(stockfish_path, size=concurrency, depth=14)
+    # Stockfish pool for agentic tool calls — 16 instances queue naturally
+    sf_pool = StockfishPool(stockfish_path, size=16, depth=14)
     await sf_pool.start()
 
     results = list(samples)
@@ -1306,7 +1302,7 @@ async def generate_coaching_with_llm(
 
         t0 = time.monotonic()
         new_thinking, new_coaching, new_tool_messages = await _coach_one(
-            aug, client, llm_model, sf_pool, semaphore
+            aug, client, llm_model, sf_pool
         )
         elapsed = time.monotonic() - t0
         n_tool_calls = len([m for m in new_tool_messages if m.get("role") == "assistant"])
@@ -1362,11 +1358,34 @@ async def generate_coaching_with_llm(
             )
 
     logger.info(
-        "LLM coaching %d samples via %s (Stockfish tool enabled)",
+        "LLM coaching %d samples via %s (%d workers)",
         len(samples),
         llm_base_url,
+        llm_workers,
     )
-    await asyncio.gather(*[rewrite_one(i, s) for i, s in enumerate(samples)])
+
+    # Bounded queue provides backpressure: producer blocks when workers are busy.
+    # Queue size = 2× workers so workers always have a next item ready.
+    queue: asyncio.Queue[tuple[int, AugmentedSample] | None] = asyncio.Queue(
+        maxsize=llm_workers * 2
+    )
+
+    async def producer() -> None:
+        for i, s in enumerate(samples):
+            await queue.put((i, s))
+        # One sentinel per worker to signal shutdown
+        for _ in range(llm_workers):
+            await queue.put(None)
+
+    async def worker() -> None:
+        while True:
+            item = await queue.get()
+            if item is None:
+                return
+            idx, aug = item
+            await rewrite_one(idx, aug)
+
+    await asyncio.gather(producer(), *[worker() for _ in range(llm_workers)])
 
     if cache_file:
         cache_file.close()
@@ -1504,6 +1523,7 @@ async def run_pipeline(
     llm_coach: bool = False,
     llm_base_url: str = "http://localhost:8100/v1",
     llm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+    llm_workers: int = 64,
     only_sources: list[str] | None = None,
 ) -> None:
     """Run the full extract → augment → format pipeline.
@@ -1586,6 +1606,7 @@ async def run_pipeline(
             llm_model=llm_model,
             stockfish_path=stockfish_path,
             cache_path=llm_cache,
+            llm_workers=llm_workers,
         )
 
     # Phase 3: Format and split
@@ -1662,6 +1683,12 @@ def main() -> None:
         help="Model name served by vLLM",
     )
     parser.add_argument(
+        "--llm-workers",
+        type=int,
+        default=64,
+        help="Number of concurrent LLM request workers (default: 64)",
+    )
+    parser.add_argument(
         "--only-sources",
         type=str,
         default=None,
@@ -1696,6 +1723,7 @@ def main() -> None:
             llm_coach=args.llm_coach,
             llm_base_url=args.llm_url,
             llm_model=args.llm_model,
+            llm_workers=args.llm_workers,
             only_sources=only_sources,
         )
     )
