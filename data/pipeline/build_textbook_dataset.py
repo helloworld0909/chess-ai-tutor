@@ -769,6 +769,7 @@ async def _discover_from_study_topics(
 async def discover_seed_users(
     client: httpx.AsyncClient,
     base_seed: list[str],
+    cache_path: Path | None = None,
 ) -> list[str]:
     """Build an expanded seed list from multiple discovery sources:
       - Base hardcoded seed list
@@ -777,7 +778,16 @@ async def discover_seed_users(
       - Study authors from popular Lichess study topic pages
 
     All discovered users (except top players) pass through the quality gate.
+    Results are cached to cache_path to avoid duplicate API calls on restart.
     """
+    # Load from cache if available — skip all network discovery
+    if cache_path and cache_path.exists():
+        cached = [line.strip() for line in cache_path.read_text().splitlines() if line.strip()]
+        logger.info(
+            "Loaded %d seed users from cache %s (skipping discovery)", len(cached), cache_path
+        )
+        return cached
+
     seen: set[str] = {u.lower() for u in base_seed}
     result: list[str] = list(base_seed)
 
@@ -815,6 +825,12 @@ async def discover_seed_users(
         logger.info("Study topics: +%d qualified (total %d)", n, len(result))
 
     logger.info("Total seed users: %d", len(result))
+
+    # Persist so restarts skip discovery entirely
+    if cache_path:
+        cache_path.write_text("\n".join(result) + "\n")
+        logger.info("Seed cache written to %s", cache_path)
+
     return result
 
 
@@ -892,10 +908,13 @@ async def build(
             "Authorization": f"Bearer {lichess_token}",
             "User-Agent": "chess-ai-tutor/1.0 (educational; github.com/chess-ai)",
         }
+        seed_cache_path = output_path.with_suffix(".seed_users")
         async with httpx.AsyncClient(
             headers=headers, timeout=180.0, follow_redirects=True
         ) as discovery_client:
-            seed_users = await discover_seed_users(discovery_client, LICHESS_STUDY_AUTHORS)
+            seed_users = await discover_seed_users(
+                discovery_client, LICHESS_STUDY_AUTHORS, cache_path=seed_cache_path
+            )
 
         crawled_users_path = output_path.with_suffix(".crawled_users")
         logger.info(
