@@ -301,6 +301,14 @@ LICHESS_STUDY_AUTHORS = [
     "nihalsarin2004",
     "DrDrunkenstein",
     "MagnusCarlsen",
+    "MatoJelic",
+    "agadmator",
+    "HangingPawns",
+    "GingerGM",
+    "JohnBartholomew",
+    "ChessTalk",
+    "PowerPlayChess",
+    "ChessDiagrams",
     # Coaches / study authors widely cited on Lichess forums
     "chess-teacher",
     "lovlas",
@@ -333,6 +341,64 @@ LICHESS_STUDY_AUTHORS = [
     "FinnegansWake",
     "ChessOpenings101",
     "Pyrrhox",
+    # Additional coaches and educators
+    "IM_Silman",
+    "GM_Smirnov",
+    "chessmood",
+    "ChessKidOfficial",
+    "dp_chess",
+    "chess_art",
+    "NMDanielRensch",
+    "Finegold",
+    "Ben_Finegold",
+    "gserper",
+    "Shellder",
+    "Chess_Fundamentals",
+    "liChessCoach",
+    "MrChessTeacher",
+    "Kostya_Kavutskiy",
+    "kkavut",
+    "NicoZwirs",
+    "colovic",
+    "Chess_Explained",
+    "IgorSmirnov",
+    "ChessHeroes",
+    "FM_Michael_Rahal",
+    "WGM_Natalia_Pogonina",
+    "ShahadeChess",
+    "JenShahade",
+    "USChessLeague",
+]
+
+# Lichess teams whose members are likely to include quality annotators.
+# 404s are silently skipped.
+LICHESS_STUDY_TEAMS = [
+    "lichess-streamer",
+    "lichess-coaches",
+    "chess-teachers",
+    "chess-coach",
+    "chess-training",
+    "lichess-study-group",
+    "chess-university",
+    "the-chess-masters",
+    "chess-improvement",
+    "chess-openings",
+    "endgame-practice",
+    "chess-tactics",
+]
+
+# Study topic slugs to mine for author usernames.
+LICHESS_STUDY_TOPICS = [
+    "Endgames",
+    "Opening",
+    "Tactics",
+    "Middlegame",
+    "Strategy",
+    "Checkmate",
+    "Pawn Structure",
+    "Attacking Chess",
+    "Chess Fundamentals",
+    "Positional Chess",
 ]
 
 
@@ -615,26 +681,123 @@ async def _fetch_top_players(
     return list(usernames)
 
 
+async def _fetch_team_members(
+    client: httpx.AsyncClient,
+    team_ids: list[str],
+) -> list[str]:
+    """Return usernames of members of the given Lichess teams (NDJSON API).
+
+    Non-existent or private teams return 404/401 and are silently skipped.
+    """
+    usernames: list[str] = []
+    for team_id in team_ids:
+        try:
+            resp = await client.get(
+                f"https://lichess.org/api/team/{team_id}/users",
+                headers={"Accept": "application/x-ndjson"},
+                timeout=60.0,
+            )
+            if resp.status_code != 200:
+                logger.debug("team/%s: status %d (skipping)", team_id, resp.status_code)
+                continue
+            count = 0
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    u = json.loads(line)
+                    name = u.get("username") or u.get("id", "")
+                    if name:
+                        usernames.append(name)
+                        count += 1
+                except Exception:
+                    pass
+            logger.info("team/%s: %d members", team_id, count)
+        except Exception as e:
+            logger.warning("team/%s: %s", team_id, e)
+    return usernames
+
+
+async def _discover_from_study_topics(
+    client: httpx.AsyncClient,
+    topics: list[str],
+) -> list[str]:
+    """Extract study owner usernames from Lichess study topic pages.
+
+    Lichess study topic pages link to user profiles via /@/{username}.
+    We parse those links from the HTML as a best-effort discovery mechanism.
+    """
+    usernames: set[str] = set()
+    _user_re = re.compile(r'/@/([A-Za-z0-9_-]{2,30})"')
+    for topic in topics:
+        for page in range(1, 4):  # up to 3 pages per topic
+            try:
+                url = f"https://lichess.org/study/topic/{topic}/hot"
+                params = {"page": page} if page > 1 else {}
+                resp = await client.get(url, params=params, timeout=30.0)
+                if resp.status_code != 200:
+                    break
+                found = set(_user_re.findall(resp.text))
+                if not found:
+                    break
+                usernames.update(found)
+                logger.info("topic/%s page %d: %d usernames", topic, page, len(found))
+            except Exception as e:
+                logger.warning("topic/%s page %d: %s", topic, page, e)
+                break
+    return list(usernames)
+
+
 async def discover_seed_users(
     client: httpx.AsyncClient,
     base_seed: list[str],
 ) -> list[str]:
-    """Build an expanded seed list: base seed + Lichess top players.
+    """Build an expanded seed list from multiple discovery sources:
+      - Base hardcoded seed list
+      - Lichess top-200 players per time control (2000+ rating guaranteed)
+      - Lichess team members for chess education teams
+      - Study authors from popular Lichess study topic pages
 
-    Top players are guaranteed 2000+ rated so they bypass the quality gate.
-    Note: Lichess team member lists are universally hidden (403) and following
-    lists require follow:read scope — neither is available without extra config.
+    All discovered users (except top players) pass through the quality gate.
     """
     seen: set[str] = {u.lower() for u in base_seed}
     result: list[str] = list(base_seed)
 
+    def _add(users: list[str]) -> int:
+        n = 0
+        for u in users:
+            if u.lower() not in seen:
+                seen.add(u.lower())
+                result.append(u)
+                n += 1
+        return n
+
+    # Top players bypass quality gate (guaranteed 2000+)
     logger.info("Discovering top players...")
     top = await _fetch_top_players(client)
-    for u in top:
-        if u.lower() not in seen:
-            seen.add(u.lower())
-            result.append(u)
-    logger.info("Total seed users after top players: %d", len(result))
+    n = _add(top)
+    logger.info("Top players: +%d (total %d)", n, len(result))
+
+    # Team members — quality gate applied below
+    logger.info("Discovering team members (%d teams)...", len(LICHESS_STUDY_TEAMS))
+    team_users = await _fetch_team_members(client, LICHESS_STUDY_TEAMS)
+    new_team = [u for u in team_users if u.lower() not in seen]
+    if new_team:
+        qualified = await _filter_users_by_quality(client, new_team)
+        n = _add(qualified)
+        logger.info("Team members: +%d qualified (total %d)", n, len(result))
+
+    # Study topic pages — quality gate applied below
+    logger.info("Discovering study topic authors (%d topics)...", len(LICHESS_STUDY_TOPICS))
+    topic_users = await _discover_from_study_topics(client, LICHESS_STUDY_TOPICS)
+    new_topic = [u for u in topic_users if u.lower() not in seen]
+    if new_topic:
+        qualified = await _filter_users_by_quality(client, new_topic)
+        n = _add(qualified)
+        logger.info("Study topics: +%d qualified (total %d)", n, len(result))
+
+    logger.info("Total seed users: %d", len(result))
     return result
 
 
