@@ -728,13 +728,16 @@ async def _fetch_team_members(
 async def _discover_from_study_topics(
     client: httpx.AsyncClient,
     topics: list[str],
-    max_studies_per_topic: int = 15,
+    max_studies_per_topic: int = 5,
 ) -> list[str]:
     """Extract annotator usernames from popular Lichess study topic pages.
 
     Lichess topic pages are JS-rendered, so only study IDs appear in the HTML.
     We extract those IDs and fetch each study's PGN to pull annotator names.
+    Fetches are throttled (0.5s apart) to stay within Lichess rate limits.
     """
+    import random
+
     _study_id_re = re.compile(r"/study/([A-Za-z0-9]{8})")
     usernames: set[str] = set()
 
@@ -751,11 +754,16 @@ async def _discover_from_study_topics(
             continue
 
         for study_id in study_ids:
+            await asyncio.sleep(0.5 + random.uniform(0, 0.3))  # throttle: ~2 req/s
             try:
                 pgn_resp = await client.get(
                     f"https://lichess.org/study/{study_id}.pgn",
                     timeout=60.0,
                 )
+                if pgn_resp.status_code == 429:
+                    logger.debug("topic study %s: 429, skipping", study_id)
+                    await asyncio.sleep(5)
+                    continue
                 if pgn_resp.status_code == 200:
                     found = _extract_annotators_from_pgn(pgn_resp.text)
                     usernames.update(found)
