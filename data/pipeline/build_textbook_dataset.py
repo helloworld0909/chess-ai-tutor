@@ -465,18 +465,22 @@ async def _fetch_one_user(
     semaphore: asyncio.Semaphore,
 ) -> tuple[str, str | None]:
     """Fetch all public studies for a Lichess user via /api/study/by/{user}/export.pgn."""
+    import random
+
     url = f"https://lichess.org/api/study/by/{username}/export.pgn"
-    for attempt in range(3):
+    for attempt in range(5):
         async with semaphore:
             try:
                 resp = await client.get(url, timeout=120.0)
                 if resp.status_code == 200 and resp.text.strip().startswith("["):
                     return username, resp.text
                 if resp.status_code == 429:
-                    # Release semaphore before sleeping so other workers aren't blocked
-                    wait = min(int(resp.headers.get("Retry-After", 3)), 15)
+                    retry_after = int(resp.headers.get("Retry-After", 0))
+                    # Exponential backoff: 2^attempt × 2s base, capped at 120s, with jitter
+                    backoff = min(2**attempt * 2 + random.uniform(0, 1), 120)
+                    wait = max(retry_after, backoff)
                     logger.warning(
-                        "lichess/%s: 429 — waiting %ds (outside semaphore)", username, wait
+                        "lichess/%s: 429 — backoff %.0fs (attempt %d)", username, wait, attempt + 1
                     )
                     await asyncio.sleep(wait)
                     continue
@@ -484,8 +488,9 @@ async def _fetch_one_user(
                     logger.debug("lichess/%s: status %d", username, resp.status_code)
                 return username, None
             except Exception as e:
-                if attempt < 2:
-                    await asyncio.sleep(3 * (attempt + 1))
+                backoff = min(2**attempt * 2, 30) + random.uniform(0, 1)
+                if attempt < 4:
+                    await asyncio.sleep(backoff)
                 else:
                     logger.warning("lichess/%s: %s", username, e)
     return username, None
@@ -722,30 +727,41 @@ async def _fetch_team_members(
 async def _discover_from_study_topics(
     client: httpx.AsyncClient,
     topics: list[str],
+    max_studies_per_topic: int = 15,
 ) -> list[str]:
-    """Extract study owner usernames from Lichess study topic pages.
+    """Extract annotator usernames from popular Lichess study topic pages.
 
-    Lichess study topic pages link to user profiles via /@/{username}.
-    We parse those links from the HTML as a best-effort discovery mechanism.
+    Lichess topic pages are JS-rendered, so only study IDs appear in the HTML.
+    We extract those IDs and fetch each study's PGN to pull annotator names.
     """
+    _study_id_re = re.compile(r"/study/([A-Za-z0-9]{8})")
     usernames: set[str] = set()
-    _user_re = re.compile(r'/@/([A-Za-z0-9_-]{2,30})"')
+
     for topic in topics:
-        for page in range(1, 4):  # up to 3 pages per topic
+        try:
+            resp = await client.get(f"https://lichess.org/study/topic/{topic}/hot", timeout=30.0)
+            if resp.status_code != 200:
+                logger.debug("topic/%s: status %d", topic, resp.status_code)
+                continue
+            study_ids = list(dict.fromkeys(_study_id_re.findall(resp.text)))[:max_studies_per_topic]
+            logger.info("topic/%s: %d study IDs found", topic, len(study_ids))
+        except Exception as e:
+            logger.warning("topic/%s: %s", topic, e)
+            continue
+
+        for study_id in study_ids:
             try:
-                url = f"https://lichess.org/study/topic/{topic}/hot"
-                params = {"page": page} if page > 1 else {}
-                resp = await client.get(url, params=params, timeout=30.0)
-                if resp.status_code != 200:
-                    break
-                found = set(_user_re.findall(resp.text))
-                if not found:
-                    break
-                usernames.update(found)
-                logger.info("topic/%s page %d: %d usernames", topic, page, len(found))
-            except Exception as e:
-                logger.warning("topic/%s page %d: %s", topic, page, e)
-                break
+                pgn_resp = await client.get(
+                    f"https://lichess.org/study/{study_id}.pgn",
+                    timeout=60.0,
+                )
+                if pgn_resp.status_code == 200:
+                    found = _extract_annotators_from_pgn(pgn_resp.text)
+                    usernames.update(found)
+            except Exception:
+                pass
+
+    logger.info("Study topics total: %d unique annotators", len(usernames))
     return list(usernames)
 
 
