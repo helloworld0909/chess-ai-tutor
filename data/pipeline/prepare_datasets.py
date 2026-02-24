@@ -457,101 +457,12 @@ class IcannosTransformer(BaseTransformer):
         logger.info("icannos: extracted %d samples", count)
 
 
-class JaisonkumarTransformer(BaseTransformer):
-    """Transform Jaisonkumar/chess-annotation-dataset into coaching samples.
-
-    365K rows of classical chess literature annotations (books, magazines,
-    historical game collections) paired with FEN+move.  ~75K rows are English
-    quality.  Treated as expert annotations (textbook path in _coach_one).
-    """
-
-    DATASET_NAME = "Jaisonkumar/chess-annotation-dataset"
-
-    # English language heuristic — require at least 3 of these common words
-    _ENGLISH_WORDS = frozenset(
-        [
-            "the",
-            "this",
-            "is",
-            "and",
-            "move",
-            "play",
-            "better",
-            "because",
-            "white",
-            "black",
-            "pawn",
-            "rook",
-            "knight",
-            "bishop",
-            "queen",
-            "king",
-            "attack",
-            "defend",
-            "position",
-            "opening",
-            "endgame",
-            "piece",
-            "square",
-            "game",
-        ]
-    )
-
-    def _is_english(self, text: str) -> bool:
-        lower = text.lower()
-        return sum(1 for w in self._ENGLISH_WORDS if w in lower) >= 3
-
-    def extract(self, max_samples: int = 0) -> Iterator[RawSample]:
-        import chess
-        from datasets import load_dataset
-
-        logger.info("Loading %s...", self.DATASET_NAME)
-        ds = load_dataset(self.DATASET_NAME, split="train")
-
-        count = 0
-        for _row in ds:
-            if max_samples and count >= max_samples:
-                break
-
-            row: dict = dict(_row)
-            annotation = (row.get("output") or "").strip()
-            inp = (row.get("input") or "").strip()
-
-            if not annotation or not inp:
-                continue
-
-            # Parse "FEN: <fen>\nMove: <san>"
-            fen_m = re.search(r"FEN:\s*(.+?)(?:\n|$)", inp)
-            move_m = re.search(r"Move:\s*(\S+)", inp)
-            if not fen_m or not move_m:
-                continue
-
-            fen = fen_m.group(1).strip()
-            move_san = move_m.group(1).strip()
-
-            try:
-                board = chess.Board(fen)
-                move = board.parse_san(move_san)
-                move_uci = move.uci()
-            except Exception:
-                continue
-
-            if not self._is_english(annotation):
-                continue
-            if len(annotation) < 15:
-                continue
-
-            yield RawSample(
-                fen=fen,
-                move_uci=move_uci,
-                move_san=move_san,
-                coaching_text=annotation,
-                thinking_text="",
-                source="jaisonkumar",
-            )
-            count += 1
-
-        logger.info("jaisonkumar: extracted %d samples", count)
+# TODO(jaisonkumar): Jaisonkumar/chess-annotation-dataset removed due to quality issues.
+# Dataset had inconsistent annotations and high noise. If reconsidering:
+# - Implement better filtering (language detection, annotation quality gates)
+# - Consider only high-confidence English annotations
+# - Validate against Stockfish before inclusion
+# See commit history for full implementation if needed.
 
 
 class TextbookTransformer(BaseTransformer):
@@ -1652,9 +1563,7 @@ async def run_pipeline(
         transformers.append(ChessCotTransformer())
     if _want("icannos"):
         transformers.append(IcannosTransformer())
-    # TODO: jaisonkumar — low quality, disabled until dataset is vetted
-    # if _want("jaisonkumar"):
-    #     transformers.append(JaisonkumarTransformer())
+    # jaisonkumar dataset removed — see TODO comment above for context
     if textbook_path and _want("textbook"):
         transformers.append(TextbookTransformer(textbook_path))
 
