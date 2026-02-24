@@ -54,17 +54,16 @@ def test_is_quality_rejects_short():
     assert not _is_quality("Good move.")
 
 
-def test_is_quality_rejects_quiz_question():
-    assert not _is_quality("What would you play here? Think about the pawn structure.")
+def test_is_quality_accepts_quiz_question():
+    # Relaxed filter: quiz/keyword filtering is now the LLM's job
+    assert _is_quality("What would you play here? Think about the pawn structure.")
 
 
-def test_is_quality_rejects_ending_question():
-    # Ends with '?' — treat as quiz
-    assert not _is_quality("Can you find the best continuation because it matters?")
-
-
-def test_is_quality_rejects_interactive():
-    assert not _is_quality("Find the best move! Think about what your opponent is threatening.")
+def test_is_quality_accepts_any_prose():
+    # No keyword requirement — permissive filter, LLM handles quality
+    assert _is_quality(
+        "A very interesting position arose from the opening that deserves more study."
+    )
 
 
 def test_is_quality_accepts_instructive():
@@ -72,10 +71,15 @@ def test_is_quality_accepts_instructive():
     assert _is_quality(text)
 
 
-def test_is_quality_rejects_no_keyword():
-    # Long enough, not a quiz, but has no instructive keyword
-    text = "A very interesting position arose from the opening that deserves more study."
-    assert not _is_quality(text)
+def test_is_quality_rejects_game_result():
+    assert not _is_quality("1-0")
+    assert not _is_quality("0-1")
+    assert not _is_quality("1/2-1/2")
+
+
+def test_is_quality_rejects_pure_move_notation():
+    assert not _is_quality("Nxe5+")
+    assert not _is_quality("O-O-O")
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +186,11 @@ def test_parse_skips_unannotated_moves():
     assert positions == []
 
 
-def test_parse_skips_quiz_annotations():
+def test_parse_keeps_quiz_annotations():
+    # Quiz annotations now pass through — LLM filters them at coaching time
     positions = list(_parse_pgn_annotations(_QUIZ_PGN, source="test"))
-    assert positions == []
+    assert len(positions) == 1
+    assert "What would you play" in positions[0].annotation
 
 
 def test_parse_multiple_games():

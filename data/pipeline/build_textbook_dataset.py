@@ -195,24 +195,25 @@ def _clean_comment(comment: str) -> str:
     return " ".join(comment.split()).strip()
 
 
+_RESULT_RE = re.compile(r"^(1-0|0-1|1/2-1/2|\*)\s*$")
+_PURE_MOVE_RE = re.compile(r"^[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](=[QRBN])?[+#]?$")
+
+
 def _is_quality(text: str) -> bool:
-    """Return True if annotation is instructive and long enough."""
-    if len(text) < MIN_ANNOTATION_LEN:
+    """Return True if annotation has enough content to be worth coaching.
+
+    Deliberately permissive — the LLM will filter weak cases at coaching time
+    (instructed to return SKIP for useless annotations).  We only drop truly
+    empty / pure-result / single-word entries here.
+    """
+    if len(text) < 15:
         return False
-    lower = text.lower()
-    if lower.rstrip().endswith("?"):
-        return False  # quiz, not coaching
-    interactive = [
-        "what would you play",
-        "what do you think",
-        "can you find",
-        "your turn",
-        "find the best",
-        "solve this",
-    ]
-    if any(phrase in lower for phrase in interactive):
+    if _RESULT_RE.match(text.strip()):
         return False
-    return any(kw in lower for kw in INSTRUCTIVE_KEYWORDS)
+    # Pure move notation with no prose ("Nxe5+", "O-O-O") — no coaching value
+    if _PURE_MOVE_RE.match(text.strip()):
+        return False
+    return True
 
 
 def _extract_concepts(text: str) -> list[str]:

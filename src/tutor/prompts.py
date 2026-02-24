@@ -143,12 +143,72 @@ TEXTBOOK_SYSTEM_PROMPT = (
     "Do not drop, weaken, or contradict any point the expert makes.\n"
     "- Do NOT introduce new chess claims or analysis beyond what the expert wrote or "
     "what Stockfish directly supports.\n"
-    "- You may call analyze_position or web_search ONLY to add concrete variations or "
-    "opening names that SUPPORT what the expert already says.\n"
     "- Rewrite in direct, concise coaching language (3–6 sentences).\n"
     "- If the expert's wording is already clear and well-structured, a light rewrite is fine; "
-    "do not pad or dilute it.\n"
+    "do not pad or dilute it.\n\n"
+    "FILTERING RULE — respond with exactly the word SKIP (nothing else) when the annotation:\n"
+    "- Contains no chess instruction (e.g. 'Forced.', 'Nice!', 'Good move.', '0-1')\n"
+    "- Is purely a game-result or time-forfeit note\n"
+    "- Is only a quiz/question with no answer or explanation\n"
+    "- Is too vague to convey any chess idea (e.g. 'Black continues their plan.')\n"
 )
+
+# Few-shot examples inserted into the message list before the real query.
+# Each tuple is (user_content, assistant_content).
+TEXTBOOK_FEW_SHOT: list[tuple[str, str]] = [
+    # --- Negative: pure result ---
+    (
+        "Move played: Rd1\nClassification: best\nEngine evaluation before move: +3.2\n\n"
+        "Expert annotation to preserve and reformat:\n0-1 White resigns.\n\n"
+        "Rewrite the expert annotation above into coaching style. "
+        "Every insight from the expert must appear in your response. "
+        "Do not omit or contradict any point.",
+        "SKIP",
+    ),
+    # --- Negative: single-word / no insight ---
+    (
+        "Move played: Nf3\nClassification: best\nEngine evaluation before move: +0.1\n\n"
+        "Expert annotation to preserve and reformat:\nForced.\n\n"
+        "Rewrite the expert annotation above into coaching style. "
+        "Every insight from the expert must appear in your response. "
+        "Do not omit or contradict any point.",
+        "SKIP",
+    ),
+    # --- Negative: quiz with no answer ---
+    (
+        "Move played: e4\nClassification: best\nEngine evaluation before move: +0.3\n\n"
+        "Expert annotation to preserve and reformat:\n"
+        "What would you play here? Find the best continuation.\n\n"
+        "Rewrite the expert annotation above into coaching style. "
+        "Every insight from the expert must appear in your response. "
+        "Do not omit or contradict any point.",
+        "SKIP",
+    ),
+    # --- Negative: vague with no chess idea ---
+    (
+        "Move played: Rb8\nClassification: good\nEngine evaluation before move: -0.5\n\n"
+        "Expert annotation to preserve and reformat:\nBlack continues their plan.\n\n"
+        "Rewrite the expert annotation above into coaching style. "
+        "Every insight from the expert must appear in your response. "
+        "Do not omit or contradict any point.",
+        "SKIP",
+    ),
+    # --- Positive: genuine instructive annotation ---
+    (
+        "Move played: Nd5\nClassification: best\nEngine evaluation before move: +1.8\n\n"
+        "Expert annotation to preserve and reformat:\n"
+        "The knight leaps to its dream square. From d5 it cannot be challenged by a pawn, "
+        "attacks the c7 weakness, and eyes the f6 entry — all at once. "
+        "This is the outpost that the entire opening was played for.\n\n"
+        "Rewrite the expert annotation above into coaching style. "
+        "Every insight from the expert must appear in your response. "
+        "Do not omit or contradict any point.",
+        "The knight jumps to d5 — a permanent outpost that no enemy pawn can challenge. "
+        "From this dominant square it simultaneously pressures the weak c7-pawn and "
+        "threatens to penetrate via f6, combining attack and restriction in one move. "
+        "The entire opening strategy has been building toward this moment.",
+    ),
+]
 
 
 def format_textbook_prompt(
@@ -204,6 +264,7 @@ def format_user_prompt(
     opponent_threats: list[str] | None = None,
     facts: list[str] | None = None,
     fen: str = "",
+    cct: dict[str, list[str]] | None = None,
 ) -> str:
     """Build the user message for the chess coaching prompt.
 
@@ -228,6 +289,17 @@ def format_user_prompt(
         if board_ascii_str
         else ""
     )
+    cct_line = ""
+    if cct:
+        parts = []
+        if cct.get("checks"):
+            parts.append(f"Checks: {', '.join(cct['checks'])}")
+        if cct.get("captures"):
+            parts.append(f"Captures: {', '.join(cct['captures'])}")
+        if cct.get("threats"):
+            parts.append(f"Threats: {', '.join(cct['threats'])}")
+        if parts:
+            cct_line = "Tactical options (CCT): " + " | ".join(parts) + "\n"
 
     return (
         f"{board_section}"
@@ -237,6 +309,7 @@ def format_user_prompt(
         f"{best_line}"
         f"{candidates_line}"
         f"{threats_line}"
+        f"{cct_line}"
         f"{facts_line}"
         "\nExplain the chess idea behind this move in 4-6 sentences. "
         "Cover the immediate tactical or positional purpose, the strategic plan it supports, "

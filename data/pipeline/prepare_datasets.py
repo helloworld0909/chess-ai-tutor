@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from chess_mcp.stockfish import Stockfish
 from tutor.prompts import (
     SYSTEM_PROMPT,
+    TEXTBOOK_FEW_SHOT,
     TEXTBOOK_SYSTEM_PROMPT,
     board_ascii,
     format_textbook_prompt,
@@ -83,6 +84,9 @@ class AugmentedSample:
     cp_loss: int
     candidates: list[str]  # e.g. ["e4 (+0.35)", "d4 (+0.30)"]
     opponent_threats: list[str]
+    cct: dict[str, list[str]] = field(
+        default_factory=dict
+    )  # {"checks": [...], "captures": [...], "threats": [...]}
     tool_messages: list[dict] = field(default_factory=list)  # intermediate tool call turns
 
 
@@ -233,10 +237,11 @@ class ChessCotTransformer(BaseTransformer):
         ds = load_dataset(self.DATASET_NAME, split="train")
 
         count = 0
-        for row in ds:
+        for _row in ds:
             if max_samples and count >= max_samples:
                 break
 
+            row: dict = dict(_row)
             # Filter by reward quality
             if row.get("reward", 0) < self.MIN_REWARD:
                 continue
@@ -504,10 +509,11 @@ class JaisonkumarTransformer(BaseTransformer):
         ds = load_dataset(self.DATASET_NAME, split="train")
 
         count = 0
-        for row in ds:
+        for _row in ds:
             if max_samples and count >= max_samples:
                 break
 
+            row: dict = dict(_row)
             annotation = (row.get("output") or "").strip()
             inp = (row.get("input") or "").strip()
 
@@ -532,7 +538,7 @@ class JaisonkumarTransformer(BaseTransformer):
 
             if not self._is_english(annotation):
                 continue
-            if not self._is_quality(annotation):
+            if len(annotation) < 15:
                 continue
 
             yield RawSample(
@@ -626,6 +632,67 @@ def _format_score(value: int, is_mate: bool) -> str:
     return f"{value / 100:+.2f}"
 
 
+_PIECE_VALUES = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+    chess.KING: 0,
+}
+
+
+def compute_cct(board: chess.Board) -> dict[str, list[str]]:
+    """Compute Check / Capture / Threat moves available to the side to move.
+
+    - checks:   legal moves that immediately give check
+    - captures: legal moves that capture an opponent piece
+    - threats:  non-check, non-capture moves that attack an undefended
+                opponent piece of strictly higher value than the attacker
+    """
+    side = board.turn
+    opp = not side
+
+    checks: list[str] = []
+    captures: list[str] = []
+    threats: list[str] = []
+
+    for move in board.legal_moves:
+        is_check = board.gives_check(move)
+        is_capture = board.is_capture(move)
+
+        if is_check:
+            checks.append(board.san(move))
+        elif is_capture:
+            captures.append(board.san(move))
+        else:
+            # Threat: after the move, does it attack an undefended opponent piece
+            # worth strictly more than the attacker?
+            attacker_piece = board.piece_at(move.from_square)
+            attacker_val = _PIECE_VALUES.get(attacker_piece.piece_type, 0) if attacker_piece else 0
+
+            board.push(move)
+            for sq in chess.SQUARES:
+                target = board.piece_at(sq)
+                if target and target.color == opp:
+                    target_val = _PIECE_VALUES.get(target.piece_type, 0)
+                    if target_val > attacker_val and board.is_attacked_by(side, sq):
+                        if not board.is_attacked_by(opp, sq):
+                            threats.append(board.peek().uci())  # store as uci, convert below
+                            break
+            board.pop()
+
+    # Convert threat ucis back to SAN using the original board
+    threat_sans: list[str] = []
+    for uci in threats:
+        try:
+            threat_sans.append(board.san(chess.Move.from_uci(uci)))
+        except Exception:
+            pass
+
+    return {"checks": checks[:5], "captures": captures[:5], "threats": threat_sans[:5]}
+
+
 async def _analyze_one(
     engine: "Stockfish",
     sample: RawSample,
@@ -680,6 +747,8 @@ async def _analyze_one(
     except Exception:
         opponent_threats = []
 
+    cct = compute_cct(board)
+
     return AugmentedSample(
         fen=sample.fen,
         move_uci=sample.move_uci,
@@ -693,6 +762,7 @@ async def _analyze_one(
         cp_loss=cp_loss,
         candidates=candidates,
         opponent_threats=opponent_threats,
+        cct=cct,
     )
 
 
@@ -752,6 +822,7 @@ async def augment_samples(
                 cp_loss=entry["cp_loss"],
                 candidates=entry["candidates"],
                 opponent_threats=entry["opponent_threats"],
+                cct=entry.get("cct", {}),
             )
 
     if todo_indices:
@@ -786,6 +857,7 @@ async def augment_samples(
                                     "cp_loss": aug.cp_loss,
                                     "candidates": aug.candidates,
                                     "opponent_threats": aug.opponent_threats,
+                                    "cct": aug.cct,
                                 }
                                 async with cache_lock:
                                     cache_file.write(json.dumps(entry) + "\n")
@@ -802,7 +874,10 @@ async def augment_samples(
                                 len(todo_indices),
                             )
             finally:
-                await engine.stop()
+                try:
+                    await engine.stop()
+                except Exception:
+                    pass  # process already dead — ignore
 
         try:
             await asyncio.gather(*[worker() for _ in range(min(workers, len(todo_indices)))])
@@ -969,7 +1044,7 @@ async def _coach_one(
     llm_model: str,
     sf_pool: StockfishPool,
     semaphore: asyncio.Semaphore,
-) -> tuple[str, str, list[dict]]:
+) -> tuple[str, str | None, list[dict]]:
     """Run one sample through the agentic coaching loop.
 
     Returns (new_thinking_text, new_coaching_text, tool_turns).
@@ -1002,8 +1077,13 @@ async def _coach_one(
             facts=None,  # expert annotation is ground truth; mechanical facts would override intent
             fen=aug.fen,
         )
+        few_shot: list[dict] = []
+        for user_ex, asst_ex in TEXTBOOK_FEW_SHOT:
+            few_shot.append({"role": "user", "content": user_ex})
+            few_shot.append({"role": "assistant", "content": asst_ex})
         messages = [
             {"role": "system", "content": TEXTBOOK_SYSTEM_PROMPT},
+            *few_shot,
             {"role": "user", "content": user_msg},
         ]
         async with semaphore:
@@ -1023,8 +1103,8 @@ async def _coach_one(
                 return aug.thinking_text, aug.coaching_text, []
         msg = resp.choices[0].message
         lm_thinking, text = _strip_thinking((msg.content or "").strip())
-        if not text:
-            return aug.thinking_text, aug.coaching_text, []
+        if not text or text.strip().upper() == "SKIP":
+            return aug.thinking_text, None, []  # None signals: discard this sample
         return lm_thinking, text, []
     else:
         user_msg = format_user_prompt(
@@ -1038,6 +1118,7 @@ async def _coach_one(
             opponent_threats=aug.opponent_threats,
             facts=facts,
             fen=aug.fen,
+            cct=aug.cct or {},
         )
         # Phase-specific tool directive
         if phase == "opening":
@@ -1230,7 +1311,18 @@ async def generate_coaching_with_llm(
         elapsed = time.monotonic() - t0
         n_tool_calls = len([m for m in new_tool_messages if m.get("role") == "assistant"])
 
-        if new_coaching:
+        if new_coaching is None:
+            # LLM signalled SKIP — drop this sample entirely
+            results[idx] = None  # type: ignore[assignment]
+            done_count[0] += 1
+            logger.info(
+                "[%d/%d] SKIP (LLM filtered): %s %s",
+                done_count[0],
+                len(samples),
+                aug.move_san,
+                aug.fen[:20],
+            )
+        elif new_coaching:
             results[idx] = dataclasses.replace(
                 aug,
                 coaching_text=new_coaching,
@@ -1280,7 +1372,9 @@ async def generate_coaching_with_llm(
         cache_file.close()
     await sf_pool.stop()
 
-    logger.info("LLM coaching complete")
+    n_skipped = sum(1 for r in results if r is None)
+    results = [r for r in results if r is not None]
+    logger.info("LLM coaching complete: %d kept, %d skipped by LLM", len(results), n_skipped)
     return results
 
 
