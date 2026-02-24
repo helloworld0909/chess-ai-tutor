@@ -586,6 +586,10 @@ class TextbookTransformer(BaseTransformer):
                 if not fen or not move_uci or not annotation:
                     continue
 
+                # Skip chess variant FENs (e.g. Crazyhouse has "[Pqp]" pocket notation)
+                if "[" in fen:
+                    continue
+
                 # Use concepts for thinking text
                 concepts = row.get("concepts", [])
                 thinking = ""
@@ -864,6 +868,25 @@ async def augment_samples(
                                     cache_file.flush()
                     except Exception as e:
                         logger.warning("Error augmenting sample %d: %s", idx, e)
+                        # Restart dead engine to prevent cascade failures
+                        err = str(e).lower()
+                        if any(
+                            k in err
+                            for k in ("connection lost", "eof", "process died", "broken pipe")
+                        ):
+                            try:
+                                await engine.stop()
+                            except Exception:
+                                pass
+                            engine = Stockfish(
+                                path=stockfish_path, depth=depth, threads=1, hash_mb=256
+                            )
+                            try:
+                                await engine.start()
+                                logger.info("Engine restarted after crash (sample %d)", idx)
+                            except Exception as restart_err:
+                                logger.warning("Failed to restart engine: %s", restart_err)
+                                break  # give up this worker slot
                     finally:
                         queue.task_done()
                         done_count[0] += 1
@@ -912,13 +935,14 @@ def _load_jsonl_cache(path: Path, key_field: str = "_key") -> dict[str, dict]:
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_COMMENT_RE = re.compile(r"<comment>(.*?)</comment>", re.DOTALL)
 
 
 def _strip_thinking(text: str) -> tuple[str, str]:
-    """Split LLM output into (thinking, coaching) text.
+    """Extract the thinking block from LLM output.
 
     Handles the Qwen3 quirk where ``</think>`` appears without ``<think>``.
-    Returns ("", "") when the thinking block is truncated (no ``</think>``).
+    Returns (thinking_text, text_with_think_removed).
     """
     # Normalize missing opening tag (Qwen3 quirk)
     if "</think>" in text and "<think>" not in text:
@@ -926,11 +950,25 @@ def _strip_thinking(text: str) -> tuple[str, str]:
     match = _THINK_RE.search(text)
     if match:
         thinking = match.group(0)[len("<think>") : -len("</think>")].strip()
-        coaching = _THINK_RE.sub("", text).strip()
-        return thinking, coaching
+        remainder = _THINK_RE.sub("", text).strip()
+        return thinking, remainder
     if "<think>" in text:  # truncated — no closing tag
         return "", ""
     return "", text  # no thinking block at all
+
+
+def _extract_comment(text: str) -> str:
+    """Extract the coaching comment from a <comment>...</comment> block.
+
+    Falls back to the text after </think> if no comment tags are present,
+    for backwards compatibility with cached responses.
+    """
+    match = _COMMENT_RE.search(text)
+    if match:
+        return match.group(1).strip()
+    # Fallback: strip thinking block and use whatever remains
+    _, remainder = _strip_thinking(text)
+    return remainder
 
 
 async def _dispatch_tool_call(tc: Any, aug_fen: str, sf_pool: Any) -> tuple[str, str]:
@@ -1065,7 +1103,7 @@ async def _coach_one(
     # Textbook samples: single direct rephrase call — no tools, no fact injection.
     # Facts are excluded to prevent the LLM from overriding the expert's stated reasoning
     # with mechanical observations that may be true but irrelevant to the expert's point.
-    is_textbook = aug.source in ("textbook", "jaisonkumar") and bool(aug.coaching_text)
+    is_textbook = aug.source == "textbook" and bool(aug.coaching_text)
     if is_textbook:
         user_msg = format_textbook_prompt(
             board_ascii_str=board_ascii(board),
@@ -1094,13 +1132,15 @@ async def _coach_one(
                     temperature=0.7,
                     extra_body={"chat_template_kwargs": {"thinking_budget": 16384}},
                 ),
-                timeout=120.0,
+                timeout=900.0,
             )
         except Exception as e:
             logger.warning("LLM textbook error for %s %s: %s", aug.move_san, aug.fen[:20], e)
             return aug.thinking_text, aug.coaching_text, []
         msg = resp.choices[0].message
-        lm_thinking, text = _strip_thinking((msg.content or "").strip())
+        raw = (msg.content or "").strip()
+        lm_thinking, _ = _strip_thinking(raw)
+        text = _extract_comment(raw)
         if not text or text.strip().upper() == "SKIP":
             return aug.thinking_text, None, []  # None signals: discard this sample
         return lm_thinking, text, []
@@ -1207,7 +1247,9 @@ async def _coach_one(
 
         # Final response — extract coaching text and tool turns
         tool_turns = messages[2:]
-        lm_thinking, text = _strip_thinking((msg.content or "").strip())
+        raw = (msg.content or "").strip()
+        lm_thinking, _ = _strip_thinking(raw)
+        text = _extract_comment(raw)
 
         if has_prior_thinking:
             # chess_cot: discard LLM thinking, keep original reasoning
@@ -1246,7 +1288,7 @@ async def generate_coaching_with_llm(
     llm_model: str,
     stockfish_path: str,
     cache_path: Path | None = None,
-    llm_workers: int = 64,
+    llm_workers: int = 128,
 ) -> list[AugmentedSample]:
     """Generate grounded coaching using an LLM agent with Stockfish tool use.
 
@@ -1280,11 +1322,11 @@ async def generate_coaching_with_llm(
         has_thinking = bool(aug.thinking_text)
         # Textbook uses a separate version key so fixes to the textbook prompt
         # invalidate only textbook cache entries, leaving chess_cot/icannos intact.
-        is_tb = aug.source in ("textbook", "jaisonkumar")
+        is_tb = aug.source == "textbook"
         key_str = (
-            f"llm5:{aug.source}:{aug.fen}:{aug.move_uci}:{has_thinking}"
+            f"llm6:{aug.source}:{aug.fen}:{aug.move_uci}:{has_thinking}"
             if is_tb
-            else f"llm3:{aug.fen}:{aug.move_uci}:{has_thinking}"
+            else f"llm4:{aug.fen}:{aug.move_uci}:{has_thinking}"
         )
         cache_key = hashlib.md5(key_str.encode()).hexdigest()
 
@@ -1523,14 +1565,14 @@ async def run_pipeline(
     llm_coach: bool = False,
     llm_base_url: str = "http://localhost:8100/v1",
     llm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
-    llm_workers: int = 64,
+    llm_workers: int = 128,
     only_sources: list[str] | None = None,
 ) -> None:
     """Run the full extract → augment → format pipeline.
 
     Args:
         only_sources: If set, only run transformers whose source name is in
-            this list. Valid values: chess_cot, icannos, jaisonkumar, textbook.
+            this list. Valid values: chess_cot, icannos, textbook.
             Default (None) runs all available transformers.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1547,8 +1589,9 @@ async def run_pipeline(
         transformers.append(ChessCotTransformer())
     if _want("icannos"):
         transformers.append(IcannosTransformer())
-    if _want("jaisonkumar"):
-        transformers.append(JaisonkumarTransformer())
+    # TODO: jaisonkumar — low quality, disabled until dataset is vetted
+    # if _want("jaisonkumar"):
+    #     transformers.append(JaisonkumarTransformer())
     if textbook_path and _want("textbook"):
         transformers.append(TextbookTransformer(textbook_path))
 
@@ -1694,7 +1737,7 @@ def main() -> None:
         default=None,
         help=(
             "Comma-separated list of sources to process. "
-            "Valid: chess_cot,icannos,jaisonkumar,textbook. "
+            "Valid: chess_cot,icannos,textbook. "
             "Default: all sources."
         ),
     )

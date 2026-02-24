@@ -38,7 +38,12 @@ SYSTEM_PROMPT = (
     "coordination, and conversion technique. Cite specific variations. "
     "4–6 sentences.\n\n"
     "Calibrate length to complexity — a simple recapture needs 2 sentences, "
-    "a deep positional sacrifice needs 6."
+    "a deep positional sacrifice needs 6.\n\n"
+    "OUTPUT FORMAT: After your reasoning, write your final coaching comment "
+    "wrapped in <comment>...</comment> tags. "
+    "Example: <comment>This move centralises the knight and eyes the weak d5 square.</comment> "
+    "The text inside <comment> is the only part shown to the student — keep it "
+    "clean, direct coaching language with no meta-commentary."
 )
 
 
@@ -138,6 +143,9 @@ TEXTBOOK_SYSTEM_PROMPT = (
     "Your ONLY task is to rewrite the provided expert annotation in clear coaching language. "
     "The expert annotation is ground truth — it comes from a qualified chess instructor "
     "and takes priority over engine classifications.\n\n"
+    "You MUST rewrite to assume that the game is currently played by your student, "
+    "even if the expert annotation says the game is played by named players. "
+    "Do NOT mention the name of the original player like Akopian or Atkins.\n\n"
     "Rules:\n"
     "- PRESERVE every chess insight, claim, plan, and explanation from the expert annotation. "
     "Do not drop, weaken, or contradict any point the expert makes.\n"
@@ -150,7 +158,11 @@ TEXTBOOK_SYSTEM_PROMPT = (
     "- Contains no chess instruction (e.g. 'Forced.', 'Nice!', 'Good move.', '0-1')\n"
     "- Is purely a game-result or time-forfeit note\n"
     "- Is only a quiz/question with no answer or explanation\n"
-    "- Is too vague to convey any chess idea (e.g. 'Black continues their plan.')\n"
+    "- Is too vague to convey any chess idea (e.g. 'Black continues their plan.')\n\n"
+    "OUTPUT FORMAT: Write your final coaching comment wrapped in <comment>...</comment> tags. "
+    "Example: <comment>The knight leaps to its outpost on d5, eyeing the weak c7-pawn.</comment> "
+    "The text inside <comment> is the only part shown to the student. "
+    "For SKIP responses, reply with exactly: <comment>SKIP</comment>"
 )
 
 # Few-shot examples inserted into the message list before the real query.
@@ -163,7 +175,7 @@ TEXTBOOK_FEW_SHOT: list[tuple[str, str]] = [
         "Rewrite the expert annotation above into coaching style. "
         "Every insight from the expert must appear in your response. "
         "Do not omit or contradict any point.",
-        "SKIP",
+        "<comment>SKIP</comment>",
     ),
     # --- Negative: single-word / no insight ---
     (
@@ -172,7 +184,7 @@ TEXTBOOK_FEW_SHOT: list[tuple[str, str]] = [
         "Rewrite the expert annotation above into coaching style. "
         "Every insight from the expert must appear in your response. "
         "Do not omit or contradict any point.",
-        "SKIP",
+        "<comment>SKIP</comment>",
     ),
     # --- Negative: quiz with no answer ---
     (
@@ -182,7 +194,7 @@ TEXTBOOK_FEW_SHOT: list[tuple[str, str]] = [
         "Rewrite the expert annotation above into coaching style. "
         "Every insight from the expert must appear in your response. "
         "Do not omit or contradict any point.",
-        "SKIP",
+        "<comment>SKIP</comment>",
     ),
     # --- Negative: vague with no chess idea ---
     (
@@ -191,7 +203,7 @@ TEXTBOOK_FEW_SHOT: list[tuple[str, str]] = [
         "Rewrite the expert annotation above into coaching style. "
         "Every insight from the expert must appear in your response. "
         "Do not omit or contradict any point.",
-        "SKIP",
+        "<comment>SKIP</comment>",
     ),
     # --- Positive: genuine instructive annotation ---
     (
@@ -203,10 +215,10 @@ TEXTBOOK_FEW_SHOT: list[tuple[str, str]] = [
         "Rewrite the expert annotation above into coaching style. "
         "Every insight from the expert must appear in your response. "
         "Do not omit or contradict any point.",
-        "The knight jumps to d5 — a permanent outpost that no enemy pawn can challenge. "
+        "<comment>The knight jumps to d5 — a permanent outpost that no enemy pawn can challenge. "
         "From this dominant square it simultaneously pressures the weak c7-pawn and "
         "threatens to penetrate via f6, combining attack and restriction in one move. "
-        "The entire opening strategy has been building toward this moment.",
+        "The entire opening strategy has been building toward this moment.</comment>",
     ),
 ]
 
