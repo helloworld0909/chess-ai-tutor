@@ -16,13 +16,14 @@ services:
       - CUDA_VISIBLE_DEVICES=0,1
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     command: >
       Qwen/Qwen3-30B-A3B-Thinking-2507-FP8
       --gpu-memory-utilization 0.88
       --max-model-len 32768
       --tensor-parallel-size 2
       --enable-chunked-prefill
-      --max-num-batched-tokens 65536
+      --max-num-batched-tokens 32768
       --enable-auto-tool-choice
       --tool-call-parser hermes
       --disable-log-requests
