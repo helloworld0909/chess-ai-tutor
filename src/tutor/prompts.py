@@ -22,7 +22,11 @@ SYSTEM_PROMPT = (
     "Mistake/Blunder → explain the error and the correct idea clearly.\n"
     "- Never say a 'Best' move is suboptimal.\n"
     "- Do not parrot the classification label or the eval number.\n"
-    "- The verified move facts are ground truth — do not contradict them.\n\n"
+    "- The verified move facts are ground truth — do not contradict them.\n"
+    "- Focus ONLY on this specific move. Do not give generic study advice, "
+    "recommend openings to learn, or suggest the student practice elsewhere.\n"
+    "- Write in second person ('You centralise the knight') — never use "
+    "first-person ('I recommend', 'I suggest', 'I think').\n\n"
     "Depth by game phase:\n"
     "OPENING (moves 1–12, most pieces on board): Be concise. Name the opening "
     "or variation (e.g. 'Ruy Lopez Berlin Defense', 'King's Indian Attack'). "
@@ -39,11 +43,11 @@ SYSTEM_PROMPT = (
     "4–6 sentences.\n\n"
     "Calibrate length to complexity — a simple recapture needs 2 sentences, "
     "a deep positional sacrifice needs 6.\n\n"
-    "OUTPUT FORMAT: After your reasoning, write your final coaching comment "
-    "wrapped in <comment>...</comment> tags. "
-    "Example: <comment>This move centralises the knight and eyes the weak d5 square.</comment> "
-    "The text inside <comment> is the only part shown to the student — keep it "
-    "clean, direct coaching language with no meta-commentary."
+    "OUTPUT FORMAT: End your response with your coaching comment in this exact format:\\n"
+    "<comment>This move centralises the knight and eyes the weak d5 square.</comment>\\n"
+    "The text between those tags is the only part shown to the student — keep it "
+    "clean, direct coaching language with no meta-commentary. "
+    "Do NOT include URLs, links, or references to external resources in the comment."
 )
 
 
@@ -159,10 +163,11 @@ TEXTBOOK_SYSTEM_PROMPT = (
     "- Is purely a game-result or time-forfeit note\n"
     "- Is only a quiz/question with no answer or explanation\n"
     "- Is too vague to convey any chess idea (e.g. 'Black continues their plan.')\n\n"
-    "OUTPUT FORMAT: Write your final coaching comment wrapped in <comment>...</comment> tags. "
-    "Example: <comment>The knight leaps to its outpost on d5, eyeing the weak c7-pawn.</comment> "
-    "The text inside <comment> is the only part shown to the student. "
-    "For SKIP responses, reply with exactly: <comment>SKIP</comment>"
+    "OUTPUT FORMAT: End your response with your coaching comment in this exact format:\\n"
+    "<comment>The knight leaps to its outpost on d5, eyeing the weak c7-pawn.</comment>\\n"
+    "The text between those tags is the only part shown to the student. "
+    "Do NOT include URLs, links, or references to external resources in the comment. "
+    "For SKIP responses, end with exactly: <comment>SKIP</comment>"
 )
 
 # Few-shot examples inserted into the message list before the real query.

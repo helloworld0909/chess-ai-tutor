@@ -960,28 +960,35 @@ def _strip_thinking(text: str) -> tuple[str, str]:
 def _extract_comment(text: str) -> str:
     """Extract the coaching comment from a <comment>...</comment> block.
 
-    Falls back to the text after </think> if no comment tags are present,
+    Always strips the <think> block first so that any mention of
+    ``<comment>`` inside the thinking section (e.g. "wrapped in <comment>
+    tags.") is not mistakenly matched as the output tag.
+
+    Falls back to the post-think remainder if no comment tags are present,
     for backwards compatibility with cached responses.
     """
-    match = _COMMENT_RE.search(text)
+    _, remainder = _strip_thinking(text)
+    search_in = remainder if remainder.strip() else text
+    match = _COMMENT_RE.search(search_in)
     if match:
         return match.group(1).strip()
-    # Fallback: strip thinking block and use whatever remains
-    _, remainder = _strip_thinking(text)
     return remainder
 
 
 _STUB_RE = re.compile(r"^[.\s…\-_*]+$")  # only dots, spaces, dashes, etc.
+_MAX_COACHING_LEN = 2000
 
 
 def _is_valid_coaching(text: str) -> bool:
-    """Return False for empty, SKIP, or placeholder stubs like '...'."""
+    """Return False for empty, SKIP, stubs, or overly long text."""
     stripped = text.strip()
     if not stripped or stripped.upper() == "SKIP":
         return False
     if _STUB_RE.match(stripped):
         return False
     if len(stripped) < 20:  # too short to be a real coaching comment
+        return False
+    if len(stripped) > _MAX_COACHING_LEN:  # overly long / padding
         return False
     return True
 
@@ -1312,7 +1319,13 @@ async def generate_coaching_with_llm(
     its coaching comment, eliminating hallucinated piece positions and tactics.
     Results are cached so the step is fully resumable.
     """
+    import logging as _logging
+    import time as _time
+
     from openai import AsyncOpenAI
+
+    # Suppress httpx request-level logs from the OpenAI client
+    _logging.getLogger("httpx").setLevel(_logging.WARNING)
 
     # Load cache — entries store {"_key", "coaching", "thinking"(optional)}
     coaching_cache: dict[str, dict] = {}
@@ -1324,10 +1337,12 @@ async def generate_coaching_with_llm(
     client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
     cache_lock = asyncio.Lock()
     cache_file = open(cache_path, "a", encoding="utf-8") if cache_path else None
-    done_count = [0]
+    done_count = [0]  # all samples processed (cache hits + generations)
+    generated_count = [0]  # only LLM generations (the bottleneck)
+    start_time = [_time.monotonic()]
 
-    # Stockfish pool for agentic tool calls — 16 instances queue naturally
-    sf_pool = StockfishPool(stockfish_path, size=16, depth=14)
+    # Stockfish pool for agentic tool calls — 8 instances queue naturally
+    sf_pool = StockfishPool(stockfish_path, size=8, depth=14)
     await sf_pool.start()
 
     results = list(samples)
@@ -1340,9 +1355,9 @@ async def generate_coaching_with_llm(
         # invalidate only textbook cache entries, leaving chess_cot/icannos intact.
         is_tb = aug.source == "textbook"
         key_str = (
-            f"llm6:{aug.source}:{aug.fen}:{aug.move_uci}:{has_thinking}"
+            f"llm9:{aug.source}:{aug.fen}:{aug.move_uci}:{has_thinking}"
             if is_tb
-            else f"llm4:{aug.fen}:{aug.move_uci}:{has_thinking}"
+            else f"llm7:{aug.fen}:{aug.move_uci}:{has_thinking}"
         )
         cache_key = hashlib.md5(key_str.encode()).hexdigest()
 
@@ -1355,7 +1370,6 @@ async def generate_coaching_with_llm(
                 tool_messages=entry.get("tool_messages", []),
             )
             done_count[0] += 1
-            logger.info("[%d/%d] cache hit: %s", done_count[0], len(samples), aug.move_san)
             return
 
         t0 = time.monotonic()
@@ -1364,6 +1378,7 @@ async def generate_coaching_with_llm(
         )
         elapsed = time.monotonic() - t0
         n_tool_calls = len([m for m in new_tool_messages if m.get("role") == "assistant"])
+        generated_count[0] += 1  # Track LLM generations (the bottleneck)
 
         if new_coaching is None:
             # LLM signalled SKIP — drop this sample entirely
@@ -1415,12 +1430,14 @@ async def generate_coaching_with_llm(
                 elapsed,
             )
 
+    total = len(samples)
     logger.info(
         "LLM coaching %d samples via %s (%d workers)",
-        len(samples),
+        total,
         llm_base_url,
         llm_workers,
     )
+    start_time[0] = _time.monotonic()
 
     # Bounded queue provides backpressure: producer blocks when workers are busy.
     # Queue size = 2× workers so workers always have a next item ready.
@@ -1443,7 +1460,37 @@ async def generate_coaching_with_llm(
             idx, aug = item
             await rewrite_one(idx, aug)
 
-    await asyncio.gather(producer(), *[worker() for _ in range(llm_workers)])
+    async def progress_reporter() -> None:
+        """Log speed and ETA every 60 seconds (based on LLM generation rate, not cache hits)."""
+        while True:
+            await asyncio.sleep(60)
+            done = done_count[0]
+            generated = generated_count[0]
+            if generated == 0:
+                continue
+            elapsed = _time.monotonic() - start_time[0]
+            gen_rate = generated / elapsed  # LLM generations/s (the bottleneck)
+            remaining_gen = total - generated
+            eta_s = int(remaining_gen / gen_rate) if gen_rate > 0 else 0
+            eta_h, eta_rem = divmod(eta_s, 3600)
+            eta_m, eta_s2 = divmod(eta_rem, 60)
+            eta_str = f"{eta_h}h {eta_m}m" if eta_h else f"{eta_m}m {eta_s2}s"
+            logger.info(
+                "\033[94m[Progress] %d/%d total (%d gen @ %.2f gen/s) — ETA: %s\033[0m",
+                done,
+                total,
+                generated,
+                gen_rate,
+                eta_str,
+            )
+            if done >= total:
+                return
+
+    await asyncio.gather(
+        producer(),
+        progress_reporter(),
+        *[worker() for _ in range(llm_workers)],
+    )
 
     if cache_file:
         cache_file.close()

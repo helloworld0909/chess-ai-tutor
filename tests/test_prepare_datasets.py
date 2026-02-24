@@ -17,6 +17,8 @@ from prepare_datasets import (
     ChessCotTransformer,
     IcannosTransformer,
     TextbookTransformer,
+    _extract_comment,
+    _strip_thinking,
     compute_cct,
     dedup_samples,
     format_training_sample,
@@ -315,6 +317,36 @@ def test_split_and_write_deterministic(tmp_path: Path):
     t1 = (dir1 / "train.jsonl").read_text()
     t2 = (dir2 / "train.jsonl").read_text()
     assert t1 == t2
+
+
+# ── _extract_comment ─────────────────────────────────────────────────────────
+
+
+def test_extract_comment_plain():
+    assert _extract_comment("<comment>Nice move.</comment>") == "Nice move."
+
+
+def test_extract_comment_strips_think_first():
+    # Model mentions <comment>tags. inside <think> — must NOT match that
+    raw = "<think>I should wrap my answer in <comment>tags.\n</think>\n\n<comment>Real coaching here.</comment>"
+    assert _extract_comment(raw) == "Real coaching here."
+
+
+def test_extract_comment_think_bleed_without_opening_tag():
+    # Qwen3 quirk: </think> without <think>
+    raw = "I should use <comment>tags.\n</think>\n\n<comment>Correct coaching.</comment>"
+    assert _extract_comment(raw) == "Correct coaching."
+
+
+def test_extract_comment_fallback_to_remainder():
+    # No <comment> tags at all — fallback to post-think text
+    raw = "<think>Some reasoning.</think>\n\nThe knight centralises."
+    assert _extract_comment(raw) == "The knight centralises."
+
+
+def test_extract_comment_skip():
+    raw = "<think>This is trivial.</think>\n\n<comment>SKIP</comment>"
+    assert _extract_comment(raw) == "SKIP"
 
 
 # ── compute_cct ──────────────────────────────────────────────────────────────
