@@ -1,6 +1,10 @@
-"""Fine-tuning script for Chess Tutor using Unsloth.
+"""SFT fine-tuning script for Chess Tutor.
 
-Supports LoRA fine-tuning of Qwen3-VL-30B-A3B-Thinking with 8-bit quantization.
+Supports QLoRA fine-tuning of Qwen3-30B-A3B (or similar) with 4-bit/8-bit
+quantization via bitsandbytes. Designed for torchrun 2-GPU launch.
+
+Usage:
+    torchrun --nproc_per_node=2 training/train.py --config training/configs/qwen3_30b.yaml
 """
 
 from __future__ import annotations
@@ -8,436 +12,391 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import torch
 import yaml
-from datasets import Dataset, load_dataset
-from transformers import (
-    TrainingArguments,
-    HfArgumentParser,
-)
+from datasets import Dataset
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ModelArguments:
-    """Arguments for model configuration."""
+    """Arguments for model and LoRA configuration."""
 
     model_name: str = field(
-        default="Qwen/Qwen3-VL-30B-A3B-Thinking",
-        metadata={"help": "Model name or path"},
+        default="Qwen/Qwen3-30B-A3B",
+        metadata={"help": "HuggingFace model name or local path"},
     )
     quantization: str = field(
-        default="8bit",
+        default="4bit",
         metadata={"help": "Quantization: 4bit, 8bit, or none"},
     )
-    lora_r: int = field(
-        default=64,
-        metadata={"help": "LoRA rank"},
-    )
-    lora_alpha: int = field(
-        default=128,
-        metadata={"help": "LoRA alpha"},
-    )
-    lora_dropout: float = field(
-        default=0.05,
-        metadata={"help": "LoRA dropout"},
-    )
-    freeze_vision: bool = field(
-        default=True,
-        metadata={"help": "Freeze vision tower"},
-    )
+    lora_r: int = field(default=64, metadata={"help": "LoRA rank"})
+    lora_alpha: int = field(default=128, metadata={"help": "LoRA alpha (2×r)"})
+    lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout"})
 
 
 @dataclass
 class DataArguments:
-    """Arguments for data configuration."""
+    """Arguments for data loading."""
 
     train_file: str = field(
         default="data/processed/train.jsonl",
-        metadata={"help": "Training data file"},
+        metadata={"help": "Training JSONL file"},
     )
     eval_file: Optional[str] = field(
         default=None,
-        metadata={"help": "Evaluation data file"},
+        metadata={"help": "Evaluation JSONL file"},
     )
     max_seq_length: int = field(
         default=8192,
-        metadata={"help": "Maximum sequence length"},
+        metadata={"help": "Maximum sequence length (tokens)"},
+    )
+    packing: bool = field(
+        default=True,
+        metadata={"help": "Pack short sequences to fill max_seq_length"},
     )
 
 
 def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file."""
-    with open(config_path, "r") as f:
+    """Load YAML config file."""
+    with open(config_path) as f:
         return yaml.safe_load(f)
 
 
-def load_training_data(data_path: str) -> Dataset:
-    """Load training data from JSONL file.
-
-    Expects format:
-    {
-        "messages": [
-            {"role": "system", "content": "..."},
-            {"role": "user", "content": "..."},
-            {"role": "assistant", "content": "..."}
-        ],
-        ...
-    }
-    """
+def load_jsonl(path: str) -> Dataset:
+    """Load JSONL file, keeping only samples with a 'messages' field."""
     data = []
-    with open(data_path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
+            line = line.strip()
+            if not line:
+                continue
             try:
                 sample = json.loads(line)
                 if "messages" in sample:
-                    data.append(sample)
+                    data.append({"messages": sample["messages"]})
             except json.JSONDecodeError:
                 continue
-
-    logger.info(f"Loaded {len(data)} training samples")
+    logger.info("Loaded %d samples from %s", len(data), path)
     return Dataset.from_list(data)
 
 
-def format_messages_for_training(example: dict) -> dict:
-    """Format messages into training text.
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
-    Converts conversation format to model input/output format.
+
+def strip_think_from_target(messages: list[dict]) -> list[dict]:
+    """Remove <think>...</think> blocks from assistant message targets.
+
+    Why: pipeline-generated thinking blocks contain meta-reasoning (notation
+    checks, legality loops) that SFT would faithfully imitate. We want SFT to
+    teach *what a good coaching comment looks like*, not *how the pipeline
+    model happened to think*. Thinking quality is left for GRPO to teach via
+    verifiable rewards.
+
+    The model still sees thinking blocks that appear earlier in multi-turn
+    conversations (as context), but is not trained to reproduce them.
     """
-    messages = example.get("messages", [])
-
-    # Build conversation text
-    text_parts = []
-
+    result = []
     for msg in messages:
-        role = msg["role"]
-        content = msg["content"]
-
-        if role == "system":
-            text_parts.append(f"<|system|>\n{content}<|end|>")
-        elif role == "user":
-            if isinstance(content, list):
-                # Multimodal content
-                text_content = ""
-                for item in content:
-                    if item.get("type") == "text":
-                        text_content += item.get("text", "")
-                text_parts.append(f"<|user|>\n{text_content}<|end|>")
-            else:
-                text_parts.append(f"<|user|>\n{content}<|end|>")
-        elif role == "assistant":
-            text_parts.append(f"<|assistant|>\n{content}<|end|>")
-
-    return {"text": "\n".join(text_parts)}
+        if msg["role"] == "assistant":
+            content = _THINK_RE.sub("", msg.get("content") or "").strip()
+            result.append({**msg, "content": content})
+        else:
+            result.append(msg)
+    return result
 
 
-def setup_model_and_tokenizer(
-    model_args: ModelArguments,
-    use_unsloth: bool = True,
-):
-    """Set up model and tokenizer with LoRA.
+def format_dataset(dataset: Dataset, tokenizer) -> Dataset:
+    """Apply the model's native chat template to every sample.
 
-    Args:
-        model_args: Model configuration
-        use_unsloth: Use Unsloth for faster training
+    Uses the tokenizer's apply_chat_template so the format is always
+    correct for the model being trained. <think> blocks are stripped from
+    assistant targets before formatting (see strip_think_from_target).
+    Samples that fail chat template application are filtered out.
+    """
+
+    def _fmt(example: dict) -> dict:
+        try:
+            messages = strip_think_from_target(example["messages"])
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            return {"text": text, "_ok": True}
+        except Exception as exc:
+            logger.debug("Skipping sample, apply_chat_template failed: %s", exc)
+            return {"text": "", "_ok": False}
+
+    dataset = dataset.map(_fmt, remove_columns=["messages"], desc="Applying chat template")
+    before = len(dataset)
+    dataset = dataset.filter(lambda x: x["_ok"])
+    dataset = dataset.remove_columns(["_ok"])
+    skipped = before - len(dataset)
+    if skipped:
+        logger.warning("Filtered %d / %d samples that failed chat template", skipped, before)
+    return dataset
+
+
+def setup_model_and_tokenizer(model_args: ModelArguments):
+    """Load model with QLoRA and tokenizer.
+
+    Uses LOCAL_RANK from the environment so each torchrun process loads
+    its own model copy onto its assigned GPU (standard DDP + QLoRA pattern).
 
     Returns:
         Tuple of (model, tokenizer)
     """
-    if use_unsloth:
-        try:
-            from unsloth import FastLanguageModel
-
-            logger.info("Using Unsloth for faster training")
-
-            # Load with Unsloth
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=model_args.model_name,
-                max_seq_length=8192,
-                dtype=torch.bfloat16,
-                load_in_8bit=model_args.quantization == "8bit",
-                load_in_4bit=model_args.quantization == "4bit",
-            )
-
-            # Add LoRA adapters
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r=model_args.lora_r,
-                target_modules=[
-                    "q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj",
-                ],
-                lora_alpha=model_args.lora_alpha,
-                lora_dropout=model_args.lora_dropout,
-                bias="none",
-                use_gradient_checkpointing="unsloth",
-                random_state=42,
-            )
-
-            return model, tokenizer
-
-        except ImportError:
-            logger.warning("Unsloth not available, falling back to standard training")
-            use_unsloth = False
-
-    # Standard HuggingFace training
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-    # Quantization config
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    # --- Tokenizer ---
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.model_name,
+        trust_remote_code=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"  # required for SFT with packing
+
+    # --- Quantization ---
     bnb_config = None
-    if model_args.quantization == "8bit":
-        bnb_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-        )
-    elif model_args.quantization == "4bit":
+    if model_args.quantization == "4bit":
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
         )
+    elif model_args.quantization == "8bit":
+        bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.model_name,
-        trust_remote_code=True,
-    )
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # Load model
+    # --- Model ---
+    # device_map={"": local_rank} pins each process's model copy to its GPU.
+    # Do NOT use device_map="auto" with torchrun DDP — it conflicts with
+    # HF Trainer's device assignment.
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name,
         quantization_config=bnb_config,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map="auto",
+        device_map={"": local_rank},
+        attn_implementation="flash_attention_2",
     )
 
-    # LoRA config
+    # Required when using gradient checkpointing with PEFT
+    model.enable_input_require_grads()
+
+    # --- LoRA ---
     lora_config = LoraConfig(
         r=model_args.lora_r,
         lora_alpha=model_args.lora_alpha,
         target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
         ],
         lora_dropout=model_args.lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
     )
-
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
     return model, tokenizer
 
 
-def train(
-    config_path: Optional[str] = None,
-    model_args: Optional[ModelArguments] = None,
-    data_args: Optional[DataArguments] = None,
-    training_args: Optional[TrainingArguments] = None,
+def build_trainer(
+    model,
+    tokenizer,
+    train_dataset: Dataset,
+    eval_dataset: Optional[Dataset],
+    data_args: DataArguments,
+    training_args,
 ):
-    """Run training.
+    """Construct SFTTrainer with response-only masking.
 
-    Args:
-        config_path: Path to YAML config file
-        model_args: Model arguments (overrides config)
-        data_args: Data arguments (overrides config)
-        training_args: Training arguments (overrides config)
+    DataCollatorForCompletionOnlyLM finds every occurrence of the assistant
+    response start token sequence and masks everything before it from the loss.
+    This ensures the model only learns to predict assistant outputs, not to
+    reproduce system/user prompts.
     """
-    # Load config if provided
-    config = {}
-    if config_path:
-        config = load_config(config_path)
+    from trl import DataCollatorForCompletionOnlyLM, SFTTrainer
 
-    # Set defaults from config
-    if model_args is None:
-        model_config = config.get("model", {})
-        lora_config = config.get("lora", {})
-        model_args = ModelArguments(
-            model_name=model_config.get("name", "Qwen/Qwen3-VL-30B-A3B-Thinking"),
-            quantization=model_config.get("quantization", "8bit"),
-            lora_r=lora_config.get("r", 64),
-            lora_alpha=lora_config.get("alpha", 128),
-            lora_dropout=lora_config.get("dropout", 0.05),
-        )
+    # Qwen3 uses ChatML: <|im_start|>assistant\n marks the start of every
+    # assistant turn. The collator searches for this token sequence and
+    # zeroes out labels for all preceding tokens.
+    response_template = "<|im_start|>assistant\n"
+    collator = DataCollatorForCompletionOnlyLM(
+        response_template=response_template,
+        tokenizer=tokenizer,
+        mlm=False,
+    )
 
-    if data_args is None:
-        train_config = config.get("training", {})
-        data_args = DataArguments(
-            train_file=train_config.get("train_file", "data/processed/train.jsonl"),
-            eval_file=train_config.get("eval_file"),
-            max_seq_length=train_config.get("max_seq_length", 8192),
-        )
+    trainer = SFTTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        args=training_args,
+        data_collator=collator,
+        dataset_text_field="text",
+        max_seq_length=data_args.max_seq_length,
+        packing=data_args.packing,
+    )
+    return trainer
 
-    if training_args is None:
-        train_config = config.get("training", {})
-        training_args = TrainingArguments(
-            output_dir=config.get("output_dir", "checkpoints/chess-tutor-v1"),
-            per_device_train_batch_size=train_config.get("per_device_train_batch_size", 1),
-            per_device_eval_batch_size=train_config.get("per_device_eval_batch_size", 1),
-            gradient_accumulation_steps=train_config.get("gradient_accumulation_steps", 16),
-            learning_rate=train_config.get("learning_rate", 1e-4),
-            lr_scheduler_type=train_config.get("lr_scheduler_type", "cosine"),
-            warmup_ratio=train_config.get("warmup_ratio", 0.03),
-            num_train_epochs=train_config.get("num_train_epochs", 3),
-            logging_steps=train_config.get("logging_steps", 10),
-            eval_strategy=train_config.get("eval_strategy", "steps"),
-            eval_steps=train_config.get("eval_steps", 200),
-            save_strategy=train_config.get("save_strategy", "steps"),
-            save_steps=train_config.get("save_steps", 500),
-            save_total_limit=train_config.get("save_total_limit", 3),
-            bf16=train_config.get("bf16", True),
-            gradient_checkpointing=train_config.get("gradient_checkpointing", True),
-            seed=train_config.get("seed", 42),
-            report_to="wandb" if config.get("wandb", {}).get("enabled") else "none",
-        )
 
-    # Initialize wandb
-    if config.get("wandb", {}).get("enabled"):
+def train(config_path: str):
+    """Run SFT training from a YAML config file."""
+    from transformers import TrainingArguments
+
+    config = load_config(config_path)
+    model_cfg = config.get("model", {})
+    lora_cfg = config.get("lora", {})
+    train_cfg = config.get("training", {})
+    wandb_cfg = config.get("wandb", {})
+
+    model_args = ModelArguments(
+        model_name=model_cfg.get("name", "Qwen/Qwen3-30B-A3B"),
+        quantization=model_cfg.get("quantization", "4bit"),
+        lora_r=lora_cfg.get("r", 64),
+        lora_alpha=lora_cfg.get("alpha", 128),
+        lora_dropout=lora_cfg.get("dropout", 0.05),
+    )
+    data_args = DataArguments(
+        train_file=train_cfg.get("train_file", "data/processed/train.jsonl"),
+        eval_file=train_cfg.get("eval_file"),
+        max_seq_length=train_cfg.get("max_seq_length", 8192),
+        packing=train_cfg.get("packing", True),
+    )
+
+    deepspeed_cfg = config.get("deepspeed", {})
+    deepspeed_path = deepspeed_cfg.get("config_file") if deepspeed_cfg.get("enabled") else None
+
+    training_args = TrainingArguments(
+        output_dir=config.get("output_dir", "checkpoints/chess-tutor-v1"),
+        per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", 1),
+        per_device_eval_batch_size=train_cfg.get("per_device_eval_batch_size", 1),
+        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 16),
+        learning_rate=train_cfg.get("learning_rate", 1e-4),
+        lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
+        warmup_ratio=train_cfg.get("warmup_ratio", 0.03),
+        num_train_epochs=train_cfg.get("num_train_epochs", 3),
+        max_steps=train_cfg.get("max_steps", -1),
+        optim=train_cfg.get("optim", "adamw_8bit"),
+        weight_decay=train_cfg.get("weight_decay", 0.01),
+        max_grad_norm=train_cfg.get("max_grad_norm", 1.0),
+        logging_steps=train_cfg.get("logging_steps", 10),
+        eval_strategy=train_cfg.get("eval_strategy", "steps"),
+        eval_steps=train_cfg.get("eval_steps", 200),
+        save_strategy=train_cfg.get("save_strategy", "steps"),
+        save_steps=train_cfg.get("save_steps", 500),
+        save_total_limit=train_cfg.get("save_total_limit", 3),
+        bf16=train_cfg.get("bf16", True),
+        gradient_checkpointing=train_cfg.get("gradient_checkpointing", True),
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        seed=train_cfg.get("seed", 42),
+        dataloader_num_workers=train_cfg.get("dataloader_num_workers", 4),
+        group_by_length=train_cfg.get("group_by_length", False),
+        report_to="wandb" if wandb_cfg.get("enabled") else "none",
+        deepspeed=deepspeed_path,
+        ddp_find_unused_parameters=False,
+    )
+
+    # --- Wandb ---
+    if wandb_cfg.get("enabled"):
         import wandb
-        wandb_config = config.get("wandb", {})
+
         wandb.init(
-            project=wandb_config.get("project", "chess-tutor"),
-            name=wandb_config.get("name"),
-            tags=wandb_config.get("tags", []),
+            project=wandb_cfg.get("project", "chess-tutor"),
+            name=wandb_cfg.get("name"),
+            tags=wandb_cfg.get("tags", []),
         )
 
-    # Load data
-    logger.info(f"Loading training data from {data_args.train_file}")
-    train_dataset = load_training_data(data_args.train_file)
-    train_dataset = train_dataset.map(format_messages_for_training)
-
-    eval_dataset = None
-    if data_args.eval_file:
-        logger.info(f"Loading eval data from {data_args.eval_file}")
-        eval_dataset = load_training_data(data_args.eval_file)
-        eval_dataset = eval_dataset.map(format_messages_for_training)
-
-    # Set up model
-    logger.info(f"Loading model: {model_args.model_name}")
+    # --- Data ---
+    logger.info("Loading training data from %s", data_args.train_file)
     model, tokenizer = setup_model_and_tokenizer(model_args)
 
-    # Create trainer
-    try:
-        from unsloth import UnslothTrainer, UnslothTrainingArguments
+    train_dataset = format_dataset(load_jsonl(data_args.train_file), tokenizer)
+    eval_dataset = None
+    if data_args.eval_file:
+        logger.info("Loading eval data from %s", data_args.eval_file)
+        eval_dataset = format_dataset(load_jsonl(data_args.eval_file), tokenizer)
 
-        trainer = UnslothTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            args=UnslothTrainingArguments(
-                **training_args.to_dict(),
-            ),
-            dataset_text_field="text",
-            max_seq_length=data_args.max_seq_length,
-        )
-    except ImportError:
-        from trl import SFTTrainer
+    # --- Train ---
+    trainer = build_trainer(
+        model,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        data_args,
+        training_args,
+    )
 
-        trainer = SFTTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            args=training_args,
-            dataset_text_field="text",
-            max_seq_length=data_args.max_seq_length,
-        )
-
-    # Train
     logger.info("Starting training...")
     trainer.train()
 
-    # Save
-    logger.info(f"Saving model to {training_args.output_dir}")
+    # --- Save ---
+    logger.info("Saving model to %s", training_args.output_dir)
     trainer.save_model()
     tokenizer.save_pretrained(training_args.output_dir)
-
-    logger.info("Training complete!")
+    logger.info("Done.")
 
 
 def main():
     """CLI entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Train Chess Tutor model")
+    parser = argparse.ArgumentParser(description="SFT training for Chess Tutor")
     parser.add_argument(
         "--config",
         "-c",
-        type=str,
-        default="training/configs/qwen3_vl_30b.yaml",
-        help="Path to config file",
+        default="training/configs/qwen3_30b.yaml",
+        help="Path to YAML config",
     )
-    parser.add_argument(
-        "--data",
-        "-d",
-        type=str,
-        default=None,
-        help="Training data file (overrides config)",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        default=None,
-        help="Output directory (overrides config)",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=None,
-        help="Number of epochs (overrides config)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=None,
-        help="Batch size (overrides config)",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=None,
-        help="Learning rate (overrides config)",
-    )
+    parser.add_argument("--data", help="Override train_file from config")
+    parser.add_argument("--output", help="Override output_dir from config")
+    parser.add_argument("--epochs", type=int, help="Override num_train_epochs")
+    parser.add_argument("--lr", type=float, help="Override learning_rate")
 
     args = parser.parse_args()
+    config_path = args.config
 
-    # Load base config
-    config = load_config(args.config) if Path(args.config).exists() else {}
+    if any([args.data, args.output, args.epochs, args.lr]):
+        # Apply CLI overrides by writing a temp config
+        import tempfile
 
-    # Apply overrides
-    if args.data:
-        config.setdefault("training", {})["train_file"] = args.data
-    if args.output:
-        config["output_dir"] = args.output
-    if args.epochs:
-        config.setdefault("training", {})["num_train_epochs"] = args.epochs
-    if args.batch_size:
-        config.setdefault("training", {})["per_device_train_batch_size"] = args.batch_size
-    if args.lr:
-        config.setdefault("training", {})["learning_rate"] = args.lr
+        cfg = load_config(config_path)
+        if args.data:
+            cfg.setdefault("training", {})["train_file"] = args.data
+        if args.output:
+            cfg["output_dir"] = args.output
+        if args.epochs:
+            cfg.setdefault("training", {})["num_train_epochs"] = args.epochs
+        if args.lr:
+            cfg.setdefault("training", {})["learning_rate"] = args.lr
 
-    # Save modified config temporarily
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        yaml.dump(config, f)
-        temp_config = f.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(cfg, f)
+            config_path = f.name
 
-    train(config_path=temp_config)
-
-    # Cleanup
-    os.unlink(temp_config)
+    train(config_path)
 
 
 if __name__ == "__main__":

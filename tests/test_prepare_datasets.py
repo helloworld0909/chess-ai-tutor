@@ -18,7 +18,6 @@ from prepare_datasets import (
     IcannosTransformer,
     TextbookTransformer,
     _extract_comment,
-    _strip_thinking,
     compute_cct,
     dedup_samples,
     format_training_sample,
@@ -328,7 +327,10 @@ def test_extract_comment_plain():
 
 def test_extract_comment_strips_think_first():
     # Model mentions <comment>tags. inside <think> — must NOT match that
-    raw = "<think>I should wrap my answer in <comment>tags.\n</think>\n\n<comment>Real coaching here.</comment>"
+    raw = (
+        "<think>I should wrap my answer in <comment>tags.\n</think>"
+        "\n\n<comment>Real coaching here.</comment>"
+    )
     assert _extract_comment(raw) == "Real coaching here."
 
 

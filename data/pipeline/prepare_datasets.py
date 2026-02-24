@@ -195,10 +195,10 @@ class ChessCotTransformer(BaseTransformer):
     @classmethod
     def _is_list_paragraph(cls, para: str) -> bool:
         """Return True if the paragraph is mostly bullet-list lines."""
-        lines = [l for l in para.splitlines() if l.strip()]
+        lines = [ln for ln in para.splitlines() if ln.strip()]
         if not lines:
             return False
-        bullet_lines = sum(1 for l in lines if l.strip().startswith("- "))
+        bullet_lines = sum(1 for ln in lines if ln.strip().startswith("- "))
         return bullet_lines / len(lines) >= 0.5
 
     @classmethod

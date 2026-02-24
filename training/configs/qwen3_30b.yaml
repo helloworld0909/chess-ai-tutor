@@ -1,0 +1,89 @@
+# Training configuration for Qwen3-30B-A3B (text-only, not VL)
+# Chess Tutor SFT with QLoRA — 2× RTX 5090
+
+# Model settings
+model:
+  # Use the instruct/thinking variant so the model already knows <think> format.
+  # For training, use the BF16 HuggingFace checkpoint (not the FP8 inference quant).
+  # Change to Qwen/Qwen3-30B-A3B-Instruct if the thinking variant isn't on HF.
+  name: Qwen/Qwen3-30B-A3B
+  quantization: 4bit        # nf4 QLoRA — fits per GPU on RTX 5090 (32 GB)
+  torch_dtype: bfloat16
+  attn_implementation: flash_attention_2
+
+# LoRA
+lora:
+  r: 64
+  alpha: 128                # 2×r is standard
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj             # MoE routing / MLP gate
+    - up_proj
+    - down_proj
+  bias: none
+  task_type: CAUSAL_LM
+
+# Training
+training:
+  train_file: data/processed/train.jsonl
+  eval_file: data/processed/eval.jsonl
+  max_seq_length: 8192
+  packing: true             # pack short sequences → better GPU utilisation
+
+  # Batch: 1 sample × 16 grad-accum × 2 GPUs = effective batch 32
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+
+  # Learning rate
+  learning_rate: 1.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+
+  # Duration — 3 epochs over ~30k samples
+  num_train_epochs: 3
+  max_steps: -1
+
+  # Optimisation
+  optim: adamw_8bit
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Memory
+  gradient_checkpointing: true
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 4
+
+  # Checkpointing / logging
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 200
+  save_strategy: steps
+  save_steps: 500
+  save_total_limit: 3
+
+  seed: 42
+
+# Output
+output_dir: checkpoints/chess-tutor-sft-v1
+
+# DeepSpeed (optional — not required for QLoRA + DDP, but saves optimizer memory)
+deepspeed:
+  enabled: false
+  config_file: training/configs/ds_zero2.json
+
+# Wandb
+wandb:
+  enabled: true
+  project: chess-tutor
+  name: qwen3-30b-qlora-sft
+  tags:
+    - chess
+    - sft
+    - qlora
+    - qwen3
