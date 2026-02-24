@@ -241,7 +241,7 @@ class ChessCotTransformer(BaseTransformer):
             if max_samples and count >= max_samples:
                 break
 
-            row: dict = dict(_row)
+            row: dict[str, Any] = dict(_row.items())
             # Filter by reward quality
             if row.get("reward", 0) < self.MIN_REWARD:
                 continue
