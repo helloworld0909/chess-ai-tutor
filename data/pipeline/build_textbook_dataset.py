@@ -476,11 +476,12 @@ async def _fetch_one_user(
                     return username, resp.text
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get("Retry-After", 0))
-                    # Exponential backoff: 2^attempt × 2s base, capped at 120s, with jitter
-                    backoff = min(2**attempt * 2 + random.uniform(0, 1), 120)
-                    wait = max(retry_after, backoff)
+                    # Full jitter: uniform sample in [0, cap] so concurrent workers
+                    # spread out rather than thundering-herd at the same moment.
+                    cap = min(2**attempt * 2, 120)
+                    wait = max(retry_after, random.uniform(0, cap))
                     logger.warning(
-                        "lichess/%s: 429 — backoff %.0fs (attempt %d)", username, wait, attempt + 1
+                        "lichess/%s: 429 — backoff %.1fs (attempt %d)", username, wait, attempt + 1
                     )
                     await asyncio.sleep(wait)
                     continue
@@ -488,9 +489,9 @@ async def _fetch_one_user(
                     logger.debug("lichess/%s: status %d", username, resp.status_code)
                 return username, None
             except Exception as e:
-                backoff = min(2**attempt * 2, 30) + random.uniform(0, 1)
+                cap = min(2**attempt * 2, 30)
                 if attempt < 4:
-                    await asyncio.sleep(backoff)
+                    await asyncio.sleep(random.uniform(0, cap))
                 else:
                     logger.warning("lichess/%s: %s", username, e)
     return username, None
