@@ -22,8 +22,10 @@ services:
       --max-model-len 32768
       --tensor-parallel-size 2
       --enable-chunked-prefill
+      --max-num-batched-tokens 65536
       --enable-auto-tool-choice
       --tool-call-parser hermes
+      --disable-log-requests
     deploy:
       resources:
         reservations:
