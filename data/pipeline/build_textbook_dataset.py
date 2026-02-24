@@ -1,8 +1,8 @@
-"""Build annotated chess textbook dataset from PGN sources.
+"""Build annotated chess textbook dataset from Lichess studies.
 
 Pipeline:
-  1. Download PGN files from PGN Mentor (players, events, openings)
-  2. Fetch annotated Lichess studies via NDJSON bulk API
+  1. Fetch Icannos/chess_studies CSV from HuggingFace (pre-curated Lichess studies)
+  2. BFS crawl Lichess /api/study/by/{user}/export.pgn for known accounts + discovered authors
   3. Parse PGN move comments → (FEN, move, annotation) triples
   4. Quality-filter annotations and extract chess concepts
   5. Write data/raw/textbook_augmented.jsonl
@@ -25,10 +25,9 @@ import json
 import logging
 import re
 import sys
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
 import chess
 import chess.pgn
@@ -38,12 +37,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+logging.getLogger("chess.pgn").setLevel(logging.CRITICAL)  # suppress illegal-move parse noise
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-PGNMENTOR_BASE = "https://pgnmentor.com"
 
 # Minimum annotation length to keep (characters)
 MIN_ANNOTATION_LEN = 30
@@ -229,11 +227,9 @@ def _extract_concepts(text: str) -> list[str]:
 def _parse_pgn_annotations(
     pgn_text: str,
     source: str,
-    max_per_game: int = 8,
 ) -> Iterator[AnnotatedPosition]:
     """Yield annotated positions from PGN text."""
     pgn_io = io.StringIO(pgn_text)
-    games_parsed = 0
 
     while True:
         try:
@@ -243,9 +239,7 @@ def _parse_pgn_annotations(
         if game is None:
             break
 
-        games_parsed += 1
         board = game.board()
-        count = 0
         node = game
         while node.variations:
             next_node = node.variations[0]
@@ -270,74 +264,9 @@ def _parse_pgn_annotations(
                     concepts=concepts,
                     source=source,
                 )
-                count += 1
-                if count >= max_per_game:
-                    break
 
             board.push(move)
             node = next_node
-
-
-# ---------------------------------------------------------------------------
-# PGN Mentor downloader
-# ---------------------------------------------------------------------------
-
-
-async def _fetch_pgnmentor_file(
-    client: httpx.AsyncClient,
-    relative_url: str,
-    semaphore: asyncio.Semaphore,
-) -> str | None:
-    """Download a single PGN Mentor file, return PGN text."""
-    url = f"{PGNMENTOR_BASE}/{relative_url}"
-    async with semaphore:
-        try:
-            resp = await client.get(url, follow_redirects=True, timeout=60.0)
-            if resp.status_code != 200:
-                logger.warning("pgnmentor %s → %d", relative_url, resp.status_code)
-                return None
-        except Exception as e:
-            logger.warning("pgnmentor %s error: %s", relative_url, e)
-            return None
-
-    if relative_url.endswith(".zip"):
-        try:
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                parts: list[str] = []
-                for name in zf.namelist():
-                    if name.lower().endswith(".pgn"):
-                        parts.append(zf.read(name).decode("utf-8", errors="replace"))
-                return "\n\n".join(parts) if parts else None
-        except Exception as e:
-            logger.warning("pgnmentor zip error %s: %s", relative_url, e)
-            return None
-    else:
-        return resp.text
-
-
-async def download_pgnmentor(
-    file_list: list[str],
-    workers: int = 10,
-) -> Iterator[tuple[str, str]]:
-    """Yield (source_label, pgn_text) for each PGN Mentor file."""
-    semaphore = asyncio.Semaphore(workers)
-    results: list[tuple[str, str | None]] = []
-
-    async with httpx.AsyncClient(
-        headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        },
-        timeout=90.0,
-    ) as client:
-        tasks = [_fetch_pgnmentor_file(client, url, semaphore) for url in file_list]
-        raw = await asyncio.gather(*tasks)
-        results = list(zip(file_list, raw))
-
-    for url, text in results:
-        if text:
-            label = Path(url).stem  # e.g. "Kasparov", "Chennai2024"
-            section = url.split("/")[0]  # players/events/openings
-            yield f"pgnmentor_{section}_{label}", text
 
 
 # ---------------------------------------------------------------------------
@@ -444,54 +373,268 @@ async def download_lichess_studies(
     return results
 
 
-async def _fetch_lichess_author_studies(
+def _extract_annotators_from_pgn(pgn_text: str) -> set[str]:
+    """Extract Lichess usernames from [Annotator] tags in PGN text.
+
+    Lichess exports annotators as full profile URLs:
+        [Annotator "https://lichess.org/@/username"]
+    but sometimes also as bare usernames.
+    """
+    found: set[str] = set()
+    for m in re.finditer(r'\[Annotator "([^"]+)"\]', pgn_text):
+        value = m.group(1).strip()
+        # URL form: https://lichess.org/@/username
+        url_m = re.search(r"lichess\.org/@/([A-Za-z0-9_-]{2,30})", value)
+        if url_m:
+            found.add(url_m.group(1))
+        elif " " not in value and "," not in value and "@" not in value and len(value) <= 30:
+            found.add(value)
+    return found
+
+
+async def _fetch_one_user(
     client: httpx.AsyncClient,
     username: str,
     semaphore: asyncio.Semaphore,
 ) -> tuple[str, str | None]:
-    """Fetch all public studies for a Lichess user as bulk PGN."""
-    async with semaphore:
-        try:
-            resp = await client.get(
-                f"https://lichess.org/api/study/by/{username}.pgn",
-                timeout=120.0,
+    """Fetch all public studies for a Lichess user via /api/study/by/{user}/export.pgn."""
+    url = f"https://lichess.org/api/study/by/{username}/export.pgn"
+    for attempt in range(3):
+        async with semaphore:
+            try:
+                resp = await client.get(url, timeout=120.0)
+                if resp.status_code == 200 and resp.text.strip().startswith("["):
+                    return username, resp.text
+                if resp.status_code == 429:
+                    # Release semaphore before sleeping so other workers aren't blocked
+                    wait = min(int(resp.headers.get("Retry-After", 3)), 15)
+                    logger.warning(
+                        "lichess/%s: 429 — waiting %ds (outside semaphore)", username, wait
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                if resp.status_code not in (404, 400):
+                    logger.debug("lichess/%s: status %d", username, resp.status_code)
+                return username, None
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(3 * (attempt + 1))
+                else:
+                    logger.warning("lichess/%s: %s", username, e)
+    return username, None
+
+
+_CHESS_TITLES = frozenset({"GM", "IM", "FM", "CM", "NM", "WGM", "WIM", "WFM", "WCM", "LM"})
+_MIN_RATING = 2000
+_MIN_FOLLOWERS = 100
+
+
+async def _filter_users_by_quality(
+    client: httpx.AsyncClient,
+    usernames: list[str],
+) -> list[str]:
+    """Return only usernames that pass the quality bar via Lichess bulk user API.
+
+    Criteria (OR):
+      - Has a chess title (GM/IM/FM/CM/NM/W*/LM)
+      - Best classical/rapid/blitz rating >= 2000
+      - followersCount >= 100
+    Falls back to accepting all users if the API call fails.
+    """
+    if not usernames:
+        return []
+    try:
+        resp = await client.post(
+            "https://lichess.org/api/users",
+            content=",".join(usernames),
+            headers={"Content-Type": "text/plain"},
+            timeout=30.0,
+        )
+        if resp.status_code != 200:
+            return usernames
+        users = resp.json()
+    except Exception:
+        return usernames  # permissive fallback
+
+    qualified: list[str] = []
+    for u in users:
+        uid: str = u.get("username", "")
+        title: str = u.get("title") or ""
+        followers: int = u.get("followersCount", 0)
+        perfs = u.get("perfs", {})
+        best_rating = max(
+            (perfs.get(k, {}).get("rating", 0) for k in ("classical", "rapid", "blitz")),
+            default=0,
+        )
+        ok = title in _CHESS_TITLES or best_rating >= _MIN_RATING or followers >= _MIN_FOLLOWERS
+        if ok:
+            logger.info(
+                "  quality OK: %s (title=%s, rating=%d, followers=%d)",
+                uid,
+                title,
+                best_rating,
+                followers,
             )
-            if resp.status_code == 200 and resp.text.strip():
-                return username, resp.text
-            return username, None
-        except Exception as e:
-            logger.warning("lichess author %s: %s", username, e)
-            return username, None
+            qualified.append(uid)
+        else:
+            logger.debug(
+                "  quality skip: %s (title=%s, rating=%d, followers=%d)",
+                uid,
+                title,
+                best_rating,
+                followers,
+            )
+    return qualified
 
 
-async def download_lichess_author_studies(workers: int = 4) -> list[tuple[str, str]]:
-    """Fetch all public studies from LICHESS_STUDY_AUTHORS via /api/study/by/{user}."""
+async def crawl_lichess_studies(
+    token: str,
+    seed_users: list[str],
+    workers: int = 4,
+    max_users: int = 2000,
+    crawled_users_path: Path | None = None,
+) -> AsyncIterator[tuple[str, str]]:
+    """BFS crawl Lichess studies starting from seed_users.
+
+    After fetching each user's studies, extracts [Annotator] usernames from
+    the returned PGN and enqueues them for fetching too.  Stops when the queue
+    is empty or max_users is reached.
+
+    crawled_users_path: if given, already-fetched usernames are loaded from this
+    file on startup (skipping re-fetch) and each newly-fetched user is appended
+    to it, so restarts skip completed work.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "chess-ai-tutor/1.0 (educational; github.com/chess-ai)",
+    }
+
+    # Load persisted completed users to skip on restart
+    already_done: set[str] = set()
+    if crawled_users_path and crawled_users_path.exists():
+        with open(crawled_users_path, encoding="utf-8") as f:
+            for line in f:
+                u = line.strip()
+                if u:
+                    already_done.add(u.lower())
+        logger.info(
+            "Loaded %d already-crawled users from %s", len(already_done), crawled_users_path
+        )
+
+    crawled_users_file = (
+        open(crawled_users_path, "a", encoding="utf-8") if crawled_users_path else None
+    )
+
+    visited: set[str] = set(already_done)
+    queue: list[str] = []
+    for u in seed_users:
+        key = u.lower()
+        if key not in visited:
+            visited.add(key)
+            queue.append(u)
+
+    with_studies = 0
     semaphore = asyncio.Semaphore(workers)
-    results: list[tuple[str, str]] = []
 
-    async with httpx.AsyncClient(
-        headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        },
-        timeout=180.0,
-        follow_redirects=True,
-    ) as client:
-        tasks = [
-            _fetch_lichess_author_studies(client, user, semaphore) for user in LICHESS_STUDY_AUTHORS
-        ]
-        raw = await asyncio.gather(*tasks)
-
-    for username, pgn in raw:
-        if pgn:
-            results.append((f"lichess_author_{username}", pgn))
-            logger.info("  %s: fetched", username)
+    try:
+        async with httpx.AsyncClient(
+            headers=headers, timeout=180.0, follow_redirects=True
+        ) as client:
+            while queue and len(visited) <= max_users:
+                # Process one batch at a time so we can yield + write immediately
+                batch, queue = queue[:workers], queue[workers:]
+                raw = await asyncio.gather(*[_fetch_one_user(client, u, semaphore) for u in batch])
+                await asyncio.sleep(0.1)  # small pause between batches
+                for username, pgn in raw:
+                    # Persist completion regardless of whether the user had studies
+                    if crawled_users_file:
+                        crawled_users_file.write(username + "\n")
+                        crawled_users_file.flush()
+                    if not pgn:
+                        continue
+                    with_studies += 1
+                    logger.info(
+                        "  [%d visited / %d queued] %s: %d chars",
+                        len(visited),
+                        len(queue),
+                        username,
+                        len(pgn),
+                    )
+                    yield f"lichess_crawl_{username}", pgn
+                    # Discover new authors — quality-gate before queuing
+                    candidates = [
+                        u
+                        for u in _extract_annotators_from_pgn(pgn)
+                        if u.lower() not in visited and len(visited) < max_users
+                    ]
+                    if candidates:
+                        qualified = await _filter_users_by_quality(client, candidates)
+                        for new_user in qualified:
+                            key = new_user.lower()
+                            if key not in visited and len(visited) < max_users:
+                                visited.add(key)
+                                queue.append(new_user)
+    finally:
+        if crawled_users_file:
+            crawled_users_file.close()
 
     logger.info(
-        "Fetched studies from %d / %d Lichess authors",
-        len(results),
-        len(LICHESS_STUDY_AUTHORS),
+        "Crawl complete: %d users visited, %d with studies, %d still queued",
+        len(visited),
+        with_studies,
+        len(queue),
     )
-    return results
+
+
+# Perf types to pull top players from (all guaranteed 2000+, skip quality gate)
+_TOP_PLAYER_PERFS = ["classical", "rapid", "blitz"]
+
+
+async def _fetch_top_players(
+    client: httpx.AsyncClient,
+    nb: int = 200,
+) -> list[str]:
+    """Return usernames of Lichess's top-nb players across classical/rapid/blitz."""
+    usernames: set[str] = set()
+    for perf in _TOP_PLAYER_PERFS:
+        try:
+            resp = await client.get(
+                f"https://lichess.org/api/player/top/{nb}/{perf}",
+                headers={"Accept": "application/json"},
+                timeout=30.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for u in data.get("users", []):
+                    usernames.add(u["username"])
+                logger.info("  top/%s: %d players", perf, len(data.get("users", [])))
+        except Exception as e:
+            logger.warning("top players %s: %s", perf, e)
+    logger.info("Top players total: %d unique", len(usernames))
+    return list(usernames)
+
+
+async def discover_seed_users(
+    client: httpx.AsyncClient,
+    base_seed: list[str],
+) -> list[str]:
+    """Build an expanded seed list: base seed + Lichess top players.
+
+    Top players are guaranteed 2000+ rated so they bypass the quality gate.
+    Note: Lichess team member lists are universally hidden (403) and following
+    lists require follow:read scope — neither is available without extra config.
+    """
+    seen: set[str] = {u.lower() for u in base_seed}
+    result: list[str] = list(base_seed)
+
+    logger.info("Discovering top players...")
+    top = await _fetch_top_players(client)
+    for u in top:
+        if u.lower() not in seen:
+            seen.add(u.lower())
+            result.append(u)
+    logger.info("Total seed users after top players: %d", len(result))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -501,10 +644,9 @@ async def download_lichess_author_studies(workers: int = 4) -> list[tuple[str, s
 
 async def build(
     output_path: Path,
-    pgnmentor_workers: int = 12,
     lichess_workers: int = 8,
-    max_positions_per_file: int = 500,
-    skip_pgnmentor: bool = False,
+    lichess_token: str = "",
+    max_crawl_users: int = 2000,
 ) -> None:
     """Run full textbook data collection pipeline."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -563,76 +705,38 @@ async def build(
 
     logger.info("After Lichess CSV: %d total positions", total_written)
 
-    # ---- Phase 1b: Lichess author studies ----
-    logger.info(
-        "=== Phase 1b: Lichess Author Studies (%d accounts) ===", len(LICHESS_STUDY_AUTHORS)
-    )
-    author_collections = await download_lichess_author_studies(workers=max(1, lichess_workers // 2))
-    for label, pgn_text in author_collections:
-        positions = list(_parse_pgn_annotations(pgn_text, source=label))
-        n = write_positions(positions)
-        if n:
-            logger.info("  %s → %d positions", label, n)
-            total_written += n
-
-    logger.info("After author studies: %d total positions", total_written)
-
-    # ---- Phase 2: PGN Mentor (rarely annotated — skip by default) ----
-    if skip_pgnmentor:
-        logger.info("=== Phase 2: PGN Mentor skipped ===")
-        out.close()
-        logger.info("=== Done: %d total positions in %s ===", total_written, output_path)
-        return
-    logger.info("=== Phase 2: PGN Mentor (%d files) ===", 0)
-
-    # Load the full file list
-    pgnmentor_files_path = Path(__file__).parent / "pgnmentor_files.txt"
-    if pgnmentor_files_path.exists():
-        all_files = [l.strip() for l in pgnmentor_files_path.read_text().splitlines() if l.strip()]
-    else:
-        # Fetch dynamically
-        logger.info("Fetching PGN Mentor file list...")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(f"{PGNMENTOR_BASE}/files.html")
-        all_files_raw = re.findall(
-            r'href="((?:players|events|openings)/[^"]+\.(?:pgn|zip))"', resp.text
-        )
-        all_files = sorted(set(all_files_raw))
-        pgnmentor_files_path.write_text("\n".join(all_files))
-
-    logger.info("PGN Mentor: %d files to process", len(all_files))
-
-    # Process in batches to limit memory usage
-    BATCH = 50
-    for batch_start in range(0, len(all_files), BATCH):
-        batch = all_files[batch_start : batch_start + BATCH]
-        logger.info("  Batch %d-%d / %d", batch_start, batch_start + len(batch), len(all_files))
-
-        semaphore = asyncio.Semaphore(pgnmentor_workers)
+    # ---- Phase 1b: Lichess BFS crawl (requires API token) ----
+    if lichess_token:
+        headers = {
+            "Authorization": f"Bearer {lichess_token}",
+            "User-Agent": "chess-ai-tutor/1.0 (educational; github.com/chess-ai)",
+        }
         async with httpx.AsyncClient(
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            },
-            timeout=90.0,
-        ) as client:
-            raw = await asyncio.gather(
-                *[_fetch_pgnmentor_file(client, url, semaphore) for url in batch]
-            )
+            headers=headers, timeout=180.0, follow_redirects=True
+        ) as discovery_client:
+            seed_users = await discover_seed_users(discovery_client, LICHESS_STUDY_AUTHORS)
 
-        batch_written = 0
-        for url, pgn_text in zip(batch, raw):
-            if not pgn_text:
-                continue
-            label = f"pgnmentor_{Path(url).stem}"
-            positions = list(_parse_pgn_annotations(pgn_text, source=label, max_per_game=5))[
-                :max_positions_per_file
-            ]
+        crawled_users_path = output_path.with_suffix(".crawled_users")
+        logger.info(
+            "=== Phase 1b: Lichess BFS crawl (seed=%d accounts, max=%d) ===",
+            len(seed_users),
+            max_crawl_users,
+        )
+        async for label, pgn_text in crawl_lichess_studies(
+            token=lichess_token,
+            seed_users=seed_users,
+            workers=lichess_workers,
+            max_users=max_crawl_users,
+            crawled_users_path=crawled_users_path,
+        ):
+            positions = list(_parse_pgn_annotations(pgn_text, source=label))
             n = write_positions(positions)
-            batch_written += n
-
-        total_written += batch_written
-        logger.info("  Batch wrote %d positions (total: %d)", batch_written, total_written)
-        await asyncio.sleep(1.0)  # pause between batches
+            if n:
+                logger.info("  %s → %d new positions (total: %d)", label, n, total_written)
+                total_written += n
+        logger.info("After BFS crawl: %d total positions", total_written)
+    else:
+        logger.info("=== Phase 1b: Skipped (no --lichess-token provided) ===")
 
     out.close()
     logger.info("=== Done: %d total positions in %s ===", total_written, output_path)
@@ -648,31 +752,27 @@ def main() -> None:
         type=Path,
         default=Path("data/raw/textbook_augmented.jsonl"),
     )
-    parser.add_argument("--workers", type=int, default=12, help="Concurrent HTTP workers")
+    parser.add_argument("--workers", type=int, default=8, help="Concurrent HTTP workers")
     parser.add_argument(
-        "--max-per-file", type=int, default=500, help="Max positions extracted per PGN file"
+        "--lichess-token",
+        type=str,
+        default="",
+        help="Lichess personal API token for authenticated study crawl",
     )
     parser.add_argument(
-        "--skip-pgnmentor",
-        action="store_true",
-        default=True,
-        help="Skip PGN Mentor phase (default: True — PGN Mentor games are rarely annotated)",
-    )
-    parser.add_argument(
-        "--pgnmentor",
-        dest="skip_pgnmentor",
-        action="store_false",
-        help="Enable PGN Mentor phase",
+        "--max-crawl-users",
+        type=int,
+        default=2000,
+        help="Maximum number of Lichess users to crawl (BFS limit)",
     )
     args = parser.parse_args()
 
     asyncio.run(
         build(
             output_path=args.output,
-            pgnmentor_workers=args.workers,
-            lichess_workers=min(args.workers, 8),
-            max_positions_per_file=args.max_per_file,
-            skip_pgnmentor=args.skip_pgnmentor,
+            lichess_workers=args.workers,
+            lichess_token=args.lichess_token,
+            max_crawl_users=args.max_crawl_users,
         )
     )
 
