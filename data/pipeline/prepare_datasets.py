@@ -1072,7 +1072,10 @@ async def _coach_one(
             return aug.thinking_text, None, []
         msg = resp.choices[0].message
         raw = (msg.content or "").strip()
-        lm_thinking, _ = _strip_thinking(raw)
+        # vLLM --reasoning-parser moves <think> into reasoning_content; prefer it
+        lm_thinking = (getattr(msg, "reasoning_content", None) or "").strip()
+        if not lm_thinking:
+            lm_thinking, _ = _strip_thinking(raw)
         text = _extract_comment(raw)
         if text.strip().upper() == "SKIP" or not _is_valid_coaching(text):
             return aug.thinking_text, None, []  # None signals: discard this sample
@@ -1181,7 +1184,10 @@ async def _coach_one(
         # Final response — extract coaching text and tool turns
         tool_turns = messages[2:]
         raw = (msg.content or "").strip()
-        lm_thinking, _ = _strip_thinking(raw)
+        # vLLM --reasoning-parser moves <think> into reasoning_content; prefer it
+        lm_thinking = (getattr(msg, "reasoning_content", None) or "").strip()
+        if not lm_thinking:
+            lm_thinking, _ = _strip_thinking(raw)
         text = _extract_comment(raw)
 
         if has_prior_thinking:
