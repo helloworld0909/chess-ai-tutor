@@ -1393,9 +1393,7 @@ async def generate_coaching_with_llm(
             elapsed = _time.monotonic() - start_time[0]
             gen_rate = generated / elapsed  # LLM generations/s (the bottleneck)
             remaining = total - done
-            gen_ratio = generated / done if done > 0 else 1.0
-            remaining_gen = remaining * gen_ratio
-            eta_s = int(remaining_gen / gen_rate) if gen_rate > 0 else 0
+            eta_s = int(remaining / gen_rate) if gen_rate > 0 else 0
             eta_h, eta_rem = divmod(eta_s, 3600)
             eta_m, eta_s2 = divmod(eta_rem, 60)
             eta_str = f"{eta_h}h {eta_m}m" if eta_h else f"{eta_m}m {eta_s2}s"

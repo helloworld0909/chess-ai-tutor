@@ -421,45 +421,27 @@ def test_cct_threat_detects_fork_setup():
 # ── ETA calculation ──────────────────────────────────────────────────────────
 
 
-def test_eta_remaining_gen_uses_cache_miss_ratio():
-    """ETA should estimate remaining generations from the cache-miss ratio,
-    not naïvely compute total - generated."""
+def test_eta_uses_remaining_over_gen_rate():
+    """ETA = remaining / gen_rate. Simple and correct."""
     total = 38527
-    done = 32285
-    generated = 5768  # only ~17.8% of done required LLM calls
+    done = 34993
+    generated = 3410
+    elapsed = generated / 1.11  # back-compute elapsed from known gen_rate
 
-    # Old (buggy) formula: remaining_gen = total - generated = 32759
-    # New formula: remaining_gen = (total - done) * (generated / done)
-    remaining = total - done  # 6242
-    gen_ratio = generated / done  # ~0.1787
-    remaining_gen = remaining * gen_ratio  # ~1115.6
+    gen_rate = generated / elapsed  # 1.11 gen/s
+    remaining = total - done  # 3534
+    eta_s = int(remaining / gen_rate)
 
-    gen_rate = 0.89  # gen/s
-    eta_s = int(remaining_gen / gen_rate)
-
-    # Should be ~21 minutes, not ~10 hours
-    assert eta_s < 3600, f"ETA should be under 1h, got {eta_s}s"
-    assert eta_s > 600, f"ETA should be at least 10m, got {eta_s}s"
-
-    # Verify the old formula would have given a much larger number
-    old_remaining_gen = total - generated
-    old_eta_s = int(old_remaining_gen / gen_rate)
-    assert old_eta_s > 30000, "Old formula should have given >8h"
+    # ~53 minutes — the old gen_ratio formula gave ~5 minutes here
+    assert 2700 < eta_s < 4200, f"ETA should be ~53m, got {eta_s}s"
 
 
-def test_eta_all_cache_hits_gives_short_eta():
-    """When everything is a cache hit, remaining_gen should be near zero."""
-    total = 1000
-    done = 900
-    generated = 10  # almost all cache hits
-
-    remaining = total - done  # 100
-    gen_ratio = generated / done  # 0.011
-    remaining_gen = remaining * gen_ratio  # ~1.1
-
-    gen_rate = 0.5
-    eta_s = int(remaining_gen / gen_rate)
-    assert eta_s < 10, f"ETA should be near-instant, got {eta_s}s"
+def test_eta_near_done():
+    """ETA shrinks to near-zero when almost done."""
+    remaining = 10
+    gen_rate = 1.0
+    eta_s = int(remaining / gen_rate)
+    assert eta_s == 10
 
 
 # ── SKIP caching ─────────────────────────────────────────────────────────────
