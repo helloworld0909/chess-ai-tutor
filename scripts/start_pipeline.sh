@@ -23,7 +23,7 @@ fi
 
 # Default arguments
 STOCKFISH="/home/zheng/.local/bin/stockfish"
-LLM_MODEL="Qwen/Qwen3-30B-A3B-Thinking-2507-FP8"
+LLM_MODEL="Qwen/Qwen3.5-35B-A3B-FP8"
 TEXTBOOK_PATH="data/raw/textbook_augmented.jsonl"
 EXTRA_ARGS=("$@")
 

@@ -1069,7 +1069,7 @@ async def _coach_one(
             )
         except Exception as e:
             logger.warning("LLM textbook error for %s %s: %s", aug.move_san, aug.fen[:20], e)
-            return aug.thinking_text, aug.coaching_text, []
+            return aug.thinking_text, None, []
         msg = resp.choices[0].message
         raw = (msg.content or "").strip()
         lm_thinking, _ = _strip_thinking(raw)
@@ -1144,7 +1144,7 @@ async def _coach_one(
             )
         except Exception as e:
             logger.warning("LLM call error for %s %s: %s", aug.move_san, aug.fen[:20], e)
-            return aug.thinking_text, "", []
+            return aug.thinking_text, None, []
 
         choice = resp.choices[0]
         msg = choice.message
@@ -1213,7 +1213,7 @@ async def _coach_one(
     logger.warning(
         "Loop exhausted (7 rounds) for %s %s — no final answer", aug.move_san, aug.fen[:20]
     )
-    return aug.thinking_text, "", []
+    return aug.thinking_text, None, []
 
 
 async def generate_coaching_with_llm(
@@ -1549,7 +1549,7 @@ async def run_pipeline(
     workers: int = 4,
     llm_coach: bool = False,
     llm_base_url: str = "http://localhost:8100/v1",
-    llm_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+    llm_model: str = "Qwen/Qwen3.5-35B-A3B-FP8",
     llm_workers: int = 128,
     only_sources: list[str] | None = None,
 ) -> None:
@@ -1625,7 +1625,7 @@ async def run_pipeline(
 
     # Phase 2.5: LLM coaching generation (optional)
     if llm_coach:
-        llm_cache = output_dir / ".llm_coaching_cache.jsonl"
+        llm_cache = output_dir / ".llm_coaching_cache_qwen35.jsonl"
         augmented = await generate_coaching_with_llm(
             augmented,
             llm_base_url=llm_base_url,
@@ -1705,7 +1705,7 @@ def main() -> None:
     parser.add_argument(
         "--llm-model",
         type=str,
-        default="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        default="Qwen/Qwen3.5-35B-A3B-FP8",
         help="Model name served by vLLM",
     )
     parser.add_argument(
