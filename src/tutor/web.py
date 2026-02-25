@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _stockfish.start()
 
     llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8100/v1")
-    _llm_model = os.environ.get("LLM_MODEL", "Qwen/Qwen3-30B-A3B-Thinking-2507-FP8")
+    _llm_model = os.environ.get("LLM_MODEL", "Qwen/Qwen3.5-35B-A3B-FP8")
     _llm_client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
 
     yield

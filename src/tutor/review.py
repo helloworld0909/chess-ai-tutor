@@ -145,7 +145,7 @@ async def _fetch_and_serve(
 )
 @click.option(
     "--llm-model",
-    default="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+    default="Qwen/Qwen3.5-35B-A3B-FP8",
     show_default=True,
     envvar="LLM_MODEL",
     help="Model name for LLM comments",

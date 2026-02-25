@@ -1,10 +1,10 @@
 """SFT fine-tuning script for Chess Tutor.
 
-Supports QLoRA fine-tuning of Qwen3-30B-A3B (or similar) with 4-bit/8-bit
+Supports QLoRA fine-tuning of Qwen3.5-35B-A3B (or similar) with 4-bit/8-bit
 quantization via bitsandbytes. Designed for torchrun 2-GPU launch.
 
 Usage:
-    torchrun --nproc_per_node=2 training/train.py --config training/configs/qwen3_30b.yaml
+    torchrun --nproc_per_node=2 training/train.py --config training/configs/qwen3.5_35b.yaml
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ class ModelArguments:
     """Arguments for model and LoRA configuration."""
 
     model_name: str = field(
-        default="Qwen/Qwen3-30B-A3B",
+        default="Qwen/Qwen3.5-35B-A3B",
         metadata={"help": "HuggingFace model name or local path"},
     )
     quantization: str = field(
@@ -273,7 +273,7 @@ def train(config_path: str):
     wandb_cfg = config.get("wandb", {})
 
     model_args = ModelArguments(
-        model_name=model_cfg.get("name", "Qwen/Qwen3-30B-A3B"),
+        model_name=model_cfg.get("name", "Qwen/Qwen3.5-35B-A3B"),
         quantization=model_cfg.get("quantization", "4bit"),
         lora_r=lora_cfg.get("r", 64),
         lora_alpha=lora_cfg.get("alpha", 128),
@@ -367,7 +367,7 @@ def main():
     parser.add_argument(
         "--config",
         "-c",
-        default="training/configs/qwen3_30b.yaml",
+        default="training/configs/qwen3.5_35b.yaml",
         help="Path to YAML config",
     )
     parser.add_argument("--data", help="Override train_file from config")

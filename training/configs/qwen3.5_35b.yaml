@@ -1,12 +1,11 @@
-# Training configuration for Qwen3-30B-A3B (text-only, not VL)
+# Training configuration for Qwen3.5-35B-A3B (text-only)
 # Chess Tutor SFT with QLoRA — 2× RTX 5090
 
 # Model settings
 model:
   # Use the instruct/thinking variant so the model already knows <think> format.
-  # For training, use the BF16 HuggingFace checkpoint (not the FP8 inference quant).
-  # Change to Qwen/Qwen3-30B-A3B-Instruct if the thinking variant isn't on HF.
-  name: Qwen/Qwen3-30B-A3B
+  # Use the BF16 HuggingFace checkpoint for training (not the FP8 inference quant).
+  name: Qwen/Qwen3.5-35B-A3B
   quantization: 4bit        # nf4 QLoRA — fits per GPU on RTX 5090 (32 GB)
   torch_dtype: bfloat16
   attn_implementation: flash_attention_2
@@ -81,7 +80,7 @@ deepspeed:
 wandb:
   enabled: true
   project: chess-tutor
-  name: qwen3-30b-qlora-sft
+  name: qwen3.5-35b-qlora-sft
   tags:
     - chess
     - sft

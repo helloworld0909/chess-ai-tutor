@@ -7,7 +7,7 @@ A pedagogical chess analysis system combining Stockfish 17 NNUE evaluations with
 - **Move Analysis**: Classify moves as Best/Great/Good/Inaccuracy/Mistake/Blunder
 - **Natural Language Explanations**: Human-like explanations of chess concepts
 - **MCP Integration**: Stockfish tools accessible via Model Context Protocol
-- **Vision-Language Support**: Process board images with Qwen3-VL model
+- **Vision-Language Support**: Process board images with Qwen3.5-35B model
 - **Verification Loop**: Cross-check LLM outputs against engine analysis
 
 ## Installation
@@ -156,7 +156,7 @@ python data/pipeline/render_boards.py --size 448
 | `train.py` | Unsloth/TRL training script | ✅ Done |
 
 **Model Configuration:**
-- Base: `Qwen/Qwen3-VL-30B-A3B-Thinking`
+- Base: `Qwen/Qwen3.5-35B-A3B`
 - Quantization: 8-bit (bitsandbytes)
 - Method: LoRA (r=64, alpha=128)
 - Target modules: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
@@ -232,7 +232,7 @@ uv run pytest tests/ -v
 │                                                                 │
 │  ┌─────────────────┐    ┌─────────────────┐                    │
 │  │  Verification   │    │  Fine-tuned LLM │                    │
-│  │  (legality.py)  │    │  (Qwen3-VL-30B) │                    │
+│  │  (legality.py)  │    │ (Qwen3.5-35B)  │                    │
 │  │  (tactical.py)  │    │                 │                    │
 │  └────────┬────────┘    └────────┬────────┘                    │
 │           │                      │                              │

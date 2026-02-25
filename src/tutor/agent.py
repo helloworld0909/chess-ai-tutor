@@ -50,7 +50,7 @@ class ChessAgent:
         self,
         base_url: str = "http://localhost:8100/v1",
         api_key: str = "dummy",
-        model: str = "Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
+        model: str = "Qwen/Qwen3.5-35B-A3B-FP8",
         stockfish_path: str | None = None,
         max_tool_rounds: int = 5,
     ):

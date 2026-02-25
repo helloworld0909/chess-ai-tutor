@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./scripts/train.sh                          # default config
-#   ./scripts/train.sh --config training/configs/qwen3_30b.yaml
+#   ./scripts/train.sh --config training/configs/qwen3.5_35b.yaml
 #   ./scripts/train.sh --epochs 1 --output checkpoints/debug
 #   ./scripts/train.sh --deepspeed              # enable ZeRO-2
 
@@ -13,7 +13,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # Default values
-CONFIG="training/configs/qwen3_30b.yaml"
+CONFIG="training/configs/qwen3.5_35b.yaml"
 NPROC=2
 EXTRA_ARGS=()
 USE_DEEPSPEED=false
