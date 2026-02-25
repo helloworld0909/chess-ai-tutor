@@ -12,12 +12,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "data" / "pipeline"))
 
 import chess
+import pytest
 from prepare_datasets import (
     AugmentedSample,
     ChessCotTransformer,
     IcannosTransformer,
     TextbookTransformer,
     _extract_comment,
+    _load_jsonl_cache,
     compute_cct,
     dedup_samples,
     format_training_sample,
@@ -414,3 +416,114 @@ def test_cct_threat_detects_fork_setup():
     # Nc7 attacks both Qe7 and Rb6 — should appear as a threat or check
     # The knight move Nc7 gives check to Qe7? No. Let's just check the function runs cleanly.
     assert isinstance(result["threats"], list)
+
+
+# ── ETA calculation ──────────────────────────────────────────────────────────
+
+
+def test_eta_remaining_gen_uses_cache_miss_ratio():
+    """ETA should estimate remaining generations from the cache-miss ratio,
+    not naïvely compute total - generated."""
+    total = 38527
+    done = 32285
+    generated = 5768  # only ~17.8% of done required LLM calls
+
+    # Old (buggy) formula: remaining_gen = total - generated = 32759
+    # New formula: remaining_gen = (total - done) * (generated / done)
+    remaining = total - done  # 6242
+    gen_ratio = generated / done  # ~0.1787
+    remaining_gen = remaining * gen_ratio  # ~1115.6
+
+    gen_rate = 0.89  # gen/s
+    eta_s = int(remaining_gen / gen_rate)
+
+    # Should be ~21 minutes, not ~10 hours
+    assert eta_s < 3600, f"ETA should be under 1h, got {eta_s}s"
+    assert eta_s > 600, f"ETA should be at least 10m, got {eta_s}s"
+
+    # Verify the old formula would have given a much larger number
+    old_remaining_gen = total - generated
+    old_eta_s = int(old_remaining_gen / gen_rate)
+    assert old_eta_s > 30000, "Old formula should have given >8h"
+
+
+def test_eta_all_cache_hits_gives_short_eta():
+    """When everything is a cache hit, remaining_gen should be near zero."""
+    total = 1000
+    done = 900
+    generated = 10  # almost all cache hits
+
+    remaining = total - done  # 100
+    gen_ratio = generated / done  # 0.011
+    remaining_gen = remaining * gen_ratio  # ~1.1
+
+    gen_rate = 0.5
+    eta_s = int(remaining_gen / gen_rate)
+    assert eta_s < 10, f"ETA should be near-instant, got {eta_s}s"
+
+
+# ── SKIP caching ─────────────────────────────────────────────────────────────
+
+
+def test_skip_cache_roundtrip(tmp_path: Path):
+    """SKIP entries written to cache should be loadable via _load_jsonl_cache."""
+    import hashlib
+
+    cache_path = tmp_path / "cache.jsonl"
+    cache_key = hashlib.md5(b"test:fen:move:True").hexdigest()
+
+    # Write a SKIP entry (same format as the pipeline writes)
+    entry = {"_key": cache_key, "_skip": True, "thinking": "This is trivial."}
+    cache_path.write_text(json.dumps(entry) + "\n")
+
+    # Load it back
+    cache = _load_jsonl_cache(cache_path)
+    assert cache_key in cache
+    assert cache[cache_key]["_skip"] is True
+    assert cache[cache_key]["thinking"] == "This is trivial."
+
+
+def test_skip_cache_preserves_thinking(tmp_path: Path):
+    """SKIP cache entries with thinking should preserve the thinking text."""
+    import hashlib
+
+    cache_path = tmp_path / "cache.jsonl"
+    key1 = hashlib.md5(b"skip_with_thinking").hexdigest()
+    key2 = hashlib.md5(b"skip_without_thinking").hexdigest()
+
+    with open(cache_path, "w") as f:
+        # Entry with thinking
+        f.write(json.dumps({"_key": key1, "_skip": True, "thinking": "Reasoning here."}) + "\n")
+        # Entry without thinking
+        f.write(json.dumps({"_key": key2, "_skip": True}) + "\n")
+
+    cache = _load_jsonl_cache(cache_path)
+    assert cache[key1].get("thinking") == "Reasoning here."
+    assert cache[key2].get("thinking") is None
+
+
+def test_skip_cache_coexists_with_normal_entries(tmp_path: Path):
+    """Cache should correctly handle a mix of SKIP and normal coaching entries."""
+    import hashlib
+
+    cache_path = tmp_path / "cache.jsonl"
+    skip_key = hashlib.md5(b"skip_entry").hexdigest()
+    normal_key = hashlib.md5(b"normal_entry").hexdigest()
+
+    with open(cache_path, "w") as f:
+        f.write(json.dumps({"_key": skip_key, "_skip": True}) + "\n")
+        f.write(
+            json.dumps({"_key": normal_key, "coaching": "Great move!", "thinking": "Analyzed."})
+            + "\n"
+        )
+
+    cache = _load_jsonl_cache(cache_path)
+    assert cache[skip_key].get("_skip") is True
+    assert "coaching" not in cache[skip_key]
+    assert cache[normal_key]["coaching"] == "Great move!"
+    assert cache[normal_key].get("_skip") is None
+
+
+
+
+

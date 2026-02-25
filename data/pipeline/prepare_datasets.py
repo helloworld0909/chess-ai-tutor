@@ -1274,6 +1274,10 @@ async def generate_coaching_with_llm(
 
         if cache_key in coaching_cache:
             entry = coaching_cache[cache_key]
+            if entry.get("_skip"):
+                results[idx] = None  # type: ignore[assignment]
+                done_count[0] += 1
+                return
             results[idx] = dataclasses.replace(
                 aug,
                 coaching_text=entry["coaching"],
@@ -1292,8 +1296,15 @@ async def generate_coaching_with_llm(
         generated_count[0] += 1  # Track LLM generations (the bottleneck)
 
         if new_coaching is None:
-            # LLM signalled SKIP — drop this sample entirely
+            # LLM signalled SKIP — cache decision and drop from results
             results[idx] = None  # type: ignore[assignment]
+            async with cache_lock:
+                if cache_file:
+                    skip_entry: dict = {"_key": cache_key, "_skip": True}
+                    if new_thinking:
+                        skip_entry["thinking"] = new_thinking
+                    cache_file.write(json.dumps(skip_entry) + "\n")
+                    cache_file.flush()
             done_count[0] += 1
             logger.info(
                 "[%d/%d] SKIP (LLM filtered): %s %s",
@@ -1381,7 +1392,9 @@ async def generate_coaching_with_llm(
                 continue
             elapsed = _time.monotonic() - start_time[0]
             gen_rate = generated / elapsed  # LLM generations/s (the bottleneck)
-            remaining_gen = total - generated
+            remaining = total - done
+            gen_ratio = generated / done if done > 0 else 1.0
+            remaining_gen = remaining * gen_ratio
             eta_s = int(remaining_gen / gen_rate) if gen_rate > 0 else 0
             eta_h, eta_rem = divmod(eta_s, 3600)
             eta_m, eta_s2 = divmod(eta_rem, 60)
