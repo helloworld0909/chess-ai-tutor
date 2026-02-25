@@ -1072,8 +1072,8 @@ async def _coach_one(
             return aug.thinking_text, None, []
         msg = resp.choices[0].message
         raw = (msg.content or "").strip()
-        # vLLM --reasoning-parser moves <think> into reasoning_content; prefer it
-        lm_thinking = (getattr(msg, "reasoning_content", None) or "").strip()
+        # vLLM --reasoning-parser returns thinking in model_extra['reasoning']
+        lm_thinking = ((msg.model_extra or {}).get("reasoning") or "").strip()
         if not lm_thinking:
             lm_thinking, _ = _strip_thinking(raw)
         text = _extract_comment(raw)
@@ -1184,8 +1184,8 @@ async def _coach_one(
         # Final response — extract coaching text and tool turns
         tool_turns = messages[2:]
         raw = (msg.content or "").strip()
-        # vLLM --reasoning-parser moves <think> into reasoning_content; prefer it
-        lm_thinking = (getattr(msg, "reasoning_content", None) or "").strip()
+        # vLLM --reasoning-parser returns thinking in model_extra['reasoning']
+        lm_thinking = ((msg.model_extra or {}).get("reasoning") or "").strip()
         if not lm_thinking:
             lm_thinking, _ = _strip_thinking(raw)
         text = _extract_comment(raw)
