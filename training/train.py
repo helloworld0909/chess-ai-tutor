@@ -112,7 +112,9 @@ def load_jsonl(path: str) -> Dataset:
                         data.append({"messages": sample["messages"]})
             except json.JSONDecodeError:
                 continue
-    logger.info("Loaded %d textbook samples (out of %d total) from %s", len(data), total_found, path)
+    logger.info(
+        "Loaded %d textbook samples (out of %d total) from %s", len(data), total_found, path
+    )
     return Dataset.from_list(data)
 
 
@@ -210,22 +212,26 @@ def setup_model_and_tokenizer(model_args: ModelArguments):
     # --- Model ---
     # Detect DDP (Distributed Data Parallel) from environment
     import os
+
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     is_distributed = local_rank != -1
 
     if is_distributed:
-        logger.info("Distributed training detected (LOCAL_RANK=%d). Disabling device_map.", local_rank)
+        logger.info(
+            "Distributed training detected (LOCAL_RANK=%d). Disabling device_map.", local_rank
+        )
         device_map = None  # Trainer will handle device placement
     else:
         # Single-process logic (supports device_map for multiple GPUs if not in DDP)
         from transformers import AutoConfig
+
         hf_cfg = AutoConfig.from_pretrained(model_args.model_name, trust_remote_code=True)
         text_cfg = getattr(hf_cfg, "text_config", hf_cfg)
         n_layers = text_cfg.num_hidden_layers
-        
+
         # Heuristic for POC vs Production scale
         is_small_model = getattr(text_cfg, "hidden_size", 4096) < 4096 or n_layers < 30
-        
+
         if is_small_model:
             logger.info("Small model detected (%d layers). Using device_map='auto'.", n_layers)
             device_map = "auto"
@@ -234,7 +240,12 @@ def setup_model_and_tokenizer(model_args: ModelArguments):
             device_map = {"model.embed_tokens": 0, "model.norm": 1, "lm_head": 1}
             for i in range(n_layers):
                 device_map[f"model.layers.{i}"] = 0 if i < split else 1
-            logger.info("Large model detected (%d layers). Using manual split: %d/%d.", n_layers, split, n_layers - split)
+            logger.info(
+                "Large model detected (%d layers). Using manual split: %d/%d.",
+                n_layers,
+                split,
+                n_layers - split,
+            )
 
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name,
@@ -365,6 +376,8 @@ def train(config_path: str):
         dataloader_num_workers=train_cfg.get("dataloader_num_workers", 4),
         report_to="wandb" if wandb_cfg.get("enabled") else "none",
         deepspeed=deepspeed_path,
+        use_liger_kernel=True,
+        ddp_find_unused_parameters=train_cfg.get("ddp_find_unused_parameters", False),
     )
 
     # --- Wandb ---
