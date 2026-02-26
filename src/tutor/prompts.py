@@ -6,7 +6,14 @@ Used by both the inference server (web.py) and the training data pipeline
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import chess
+
+from tutor.analysis import compute_position_context
+
+if TYPE_CHECKING:
+    from tutor.analysis import TreeNode
 
 # ---------------------------------------------------------------------------
 # System prompt — used verbatim at both training and inference time
@@ -64,77 +71,6 @@ def board_ascii(board: chess.Board) -> str:
         lines.append(f"{8 - i} {row}")
     lines.append(f"  ({'White' if board.turn == chess.WHITE else 'Black'} to move)")
     return "\n".join(lines)
-
-
-def move_facts(board: chess.Board, move: chess.Move) -> list[str]:
-    """Extract verifiable mechanical facts about a move using python-chess."""
-    piece = board.piece_at(move.from_square)
-    if piece is None:
-        return []
-
-    facts: list[str] = []
-    piece_name = chess.piece_name(piece.piece_type)
-    our_color = piece.color
-    their_color = not our_color
-    to_sq = chess.square_name(move.to_square)
-
-    # Special moves
-    if board.is_castling(move):
-        facts.append("king castles for safety and connects the rooks")
-        return facts
-    if board.is_en_passant(move):
-        facts.append(f"en passant capture on {to_sq}")
-    elif board.is_capture(move):
-        cap = board.piece_at(move.to_square)
-        if cap:
-            facts.append(f"captures {chess.piece_name(cap.piece_type)} on {to_sq}")
-
-    # Check
-    if board.gives_check(move):
-        facts.append("gives check to the opponent's king")
-
-    # Was the moving piece under attack before? (defensive retreat)
-    if board.attackers(their_color, move.from_square):
-        facts.append(f"rescues the {piece_name} which was under attack")
-
-    # Analyse the resulting position
-    board_after = board.copy()
-    board_after.push(move)
-
-    attacked_sq = board_after.attacks(move.to_square)
-
-    # Enemy pieces now attacked
-    attacked_enemies = [
-        f"{chess.piece_name(p.piece_type)} on {chess.square_name(sq)}"
-        for sq in attacked_sq
-        if (p := board_after.piece_at(sq)) and p.color == their_color
-    ]
-    if attacked_enemies:
-        facts.append(f"now attacks {', '.join(attacked_enemies)}")
-
-    # Own pieces now supported by the moved piece
-    supported = [
-        f"{chess.piece_name(p.piece_type)} on {chess.square_name(sq)}"
-        for sq in attacked_sq
-        if (p := board_after.piece_at(sq)) and p.color == our_color and sq != move.to_square
-    ]
-    if supported:
-        facts.append(f"defends own {', '.join(supported)}")
-
-    # Own pieces that lost their defender after this piece moved away
-    now_hanging = [
-        f"{chess.piece_name(p.piece_type)} on {chess.square_name(sq)}"
-        for sq in board.attacks(move.from_square)
-        if (p := board.piece_at(sq))
-        and p.color == our_color
-        and sq != move.to_square
-        and not board_after.is_attacked_by(our_color, sq)  # no longer defended
-        and board_after.is_attacked_by(their_color, sq)  # opponent attacks it
-    ]
-    if now_hanging:
-        facts.append(f"leaves own {', '.join(now_hanging)} undefended")
-
-    return facts
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +170,6 @@ def format_textbook_prompt(
     classification: str,
     eval_str: str,
     expert_annotation: str,
-    facts: list[str] | None = None,
     fen: str = "",
 ) -> str:
     """Build the user message for textbook annotation rewriting.
@@ -242,9 +177,6 @@ def format_textbook_prompt(
     The expert annotation is the primary content — the LLM's job is to reformat
     it faithfully, not to generate fresh analysis.
     """
-    facts_line = (
-        "Verified move facts:\n" + "\n".join(f"- {f}" for f in facts) + "\n" if facts else ""
-    )
     fen_line = f"FEN: {fen}\n" if fen else ""
     board_section = (
         f"Board position before the move:\n{board_ascii_str}\n{fen_line}\n"
@@ -257,7 +189,6 @@ def format_textbook_prompt(
         f"Move played: {san}\n"
         f"Classification: {classification}\n"
         f"Engine evaluation before move: {eval_str}\n"
-        f"{facts_line}"
         f"\nExpert annotation to preserve and reformat:\n{expert_annotation}\n"
         "\nRewrite the expert annotation above into coaching style. "
         "Every insight from the expert must appear in your response. "
@@ -270,6 +201,135 @@ def format_textbook_prompt(
 # ---------------------------------------------------------------------------
 
 
+def _cct_inline(cct: dict[str, list[str]]) -> str:
+    """Format a CCT dict as a compact inline string."""
+    parts = []
+    if cct.get("checks"):
+        parts.append(f"Checks: {', '.join(cct['checks'])}")
+    if cct.get("captures"):
+        parts.append(f"Captures: {', '.join(cct['captures'])}")
+    if cct.get("threats"):
+        parts.append(f"Threats: {', '.join(cct['threats'])}")
+    return " | ".join(parts) if parts else "none"
+
+
+def _render_move_tree(nodes: list[TreeNode], played_san: str) -> str:
+    """Render a 3-level move tree as a numbered, LLM-readable block.
+
+    Format:
+      1) Opponent: Nc6 [+0.28]
+         Your options (CCT): Threats: Nxe4
+         1a) You: d4 [+0.32]
+             Opp options (CCT): Captures: dxe5
+             Opp replies: exd4 [+0.20] · d6 [+0.28] · Bc5 [+0.25]
+         1b) You: Bb5 [+0.31]
+             ...
+    """
+    if not nodes:
+        return ""
+
+    _LETTERS = "abc"
+    lines = [f"## Continuation Tree\n\nAfter {played_san}, opponent's top replies:\n"]
+
+    for i, l1 in enumerate(nodes, start=1):
+        lines.append(f"{i}) Opponent: {l1.move_san} [{l1.eval_str}]")
+        cct1 = _cct_inline(l1.cct)
+        if cct1 != "none":
+            lines.append(f"   Your options (CCT): {cct1}")
+
+        for j, l2 in enumerate(l1.children):
+            letter = _LETTERS[j] if j < len(_LETTERS) else str(j + 1)
+            lines.append(f"   {i}{letter}) You: {l2.move_san} [{l2.eval_str}]")
+            cct2 = _cct_inline(l2.cct)
+            if cct2 != "none":
+                lines.append(f"       Opp options (CCT): {cct2}")
+            if l2.children:
+                l3_str = " · ".join(f"{l3.move_san} [{l3.eval_str}]" for l3 in l2.children)
+                lines.append(f"       Opp replies: {l3_str}")
+
+        if i < len(nodes):
+            lines.append("")  # blank line between L1 entries
+
+    return "\n".join(lines)
+
+
+def format_position_context(ctx: dict[str, Any]) -> str:
+    """Format the position context dict as a readable ## section for the LLM prompt."""
+    if not ctx:
+        return ""
+
+    lines = ["## Position Context\n"]
+
+    # Game phase & material
+    phase = ctx.get("game_phase", "")
+    move_num = ctx.get("move_number", "")
+    mat_w = ctx.get("material_white", 0)
+    mat_b = ctx.get("material_black", 0)
+    balance = ctx.get("material_balance", 0)
+    bal_str = f"+{balance}" if balance > 0 else str(balance)
+    lines.append(
+        f"Phase: {phase}  |  Move: {move_num}  |  Material — White: {mat_w}  Black: {mat_b}  Balance: {bal_str}"
+    )
+
+    # Pawn structure
+    def _pawn_facts(passed: list[str], doubled: list[str], isolated: list[str]) -> str:
+        parts = []
+        if passed:
+            parts.append(f"passed on {', '.join(passed)}")
+        if doubled:
+            files_str = ", ".join(f"{f}-file" for f in doubled)
+            parts.append(f"doubled on {files_str}")
+        if isolated:
+            parts.append(f"isolated on {', '.join(isolated)}")
+        return ", ".join(parts) if parts else "none"
+
+    pw = _pawn_facts(
+        ctx.get("passed_pawns_white", []),
+        ctx.get("doubled_files_white", []),
+        ctx.get("isolated_pawns_white", []),
+    )
+    pb = _pawn_facts(
+        ctx.get("passed_pawns_black", []),
+        ctx.get("doubled_files_black", []),
+        ctx.get("isolated_pawns_black", []),
+    )
+    lines.append(f"Pawn structure — White: {pw}  |  Black: {pb}")
+
+    # Open files
+    open_files = ctx.get("open_files", [])
+    hw = ctx.get("half_open_white", [])
+    hb = ctx.get("half_open_black", [])
+    file_parts = []
+    if open_files:
+        file_parts.append(f"Open: {', '.join(open_files)}")
+    if hw:
+        file_parts.append(f"Half-open (White): {', '.join(hw)}")
+    if hb:
+        file_parts.append(f"Half-open (Black): {', '.join(hb)}")
+    if file_parts:
+        lines.append("Files — " + "  |  ".join(file_parts))
+
+    # King safety
+    ks_w = ctx.get("king_shield_white", 0)
+    ks_b = ctx.get("king_shield_black", 0)
+    on_w = ctx.get("open_near_king_white", [])
+    on_b = ctx.get("open_near_king_black", [])
+    w_king = f"{ks_w} shield pawn{'s' if ks_w != 1 else ''}"
+    if on_w:
+        w_king += f", open file{'s' if len(on_w) > 1 else ''} {', '.join(on_w)} near king"
+    b_king = f"{ks_b} shield pawn{'s' if ks_b != 1 else ''}"
+    if on_b:
+        b_king += f", open file{'s' if len(on_b) > 1 else ''} {', '.join(on_b)} near king"
+    lines.append(f"King safety — White: {w_king}  |  Black: {b_king}")
+
+    # Piece mobility
+    mob_w = ctx.get("mobility_white", 0)
+    mob_b = ctx.get("mobility_black", 0)
+    lines.append(f"Piece mobility — White: {mob_w}  |  Black: {mob_b}")
+
+    return "\n".join(lines) + "\n"
+
+
 def format_user_prompt(
     board_ascii_str: str,
     san: str,
@@ -279,57 +339,84 @@ def format_user_prompt(
     cp_loss: int = 0,
     candidates: list[str] | None = None,
     opponent_threats: list[str] | None = None,
-    facts: list[str] | None = None,
     fen: str = "",
     cct: dict[str, list[str]] | None = None,
+    move_tree: list[TreeNode] | None = None,
+    position_context: dict[str, Any] | None = None,
 ) -> str:
-    """Build the user message for the chess coaching prompt.
+    """Build the structured user message for the chess coaching prompt.
 
-    This function is the single source of truth for the user prompt format,
-    used identically by the inference server and the training data pipeline.
+    Uses ## section headers so the LLM can easily parse each component.
+    This is the single source of truth for the user prompt format — used
+    identically by the inference server and the training data pipeline.
     """
-    best_line = (
-        f"Engine's best move was: {best_move} (−{cp_loss} centipawns)\n" if cp_loss > 0 else ""
+    # --- Section 1: Position before your move ---
+    position_section = ""
+    if board_ascii_str:
+        fen_line = f"FEN: {fen}\n" if fen else ""
+        position_section = f"## Position before your move\n\n{board_ascii_str}\n{fen_line}\n"
+
+    # --- Section 2: Position Context before your move ---
+    ctx_section = ""
+    if position_context:
+        ctx_text = format_position_context(position_context)
+        ctx_text = ctx_text.replace(
+            "## Position Context", "## Position Context before your move", 1
+        )
+        ctx_section = ctx_text + "\n"
+
+    # --- Section 3: Move Played ---
+    move_header = (
+        f"## Move Played\n\nMove: {san}  |  Classification: {classification}  |  Eval: {eval_str}\n"
     )
-    candidates_line = f"Engine's top candidates: {', '.join(candidates)}\n" if candidates else ""
+    best_line = f"Engine best was: {best_move} (\u2212{cp_loss} cp)\n" if cp_loss > 0 else ""
+    candidates_line = f"Engine top candidates: {', '.join(candidates)}\n" if candidates else ""
     threats_line = (
-        f"Opponent's threats if you passed: {', '.join(opponent_threats)}\n"
+        f"Opponent threats if you passed: {', '.join(opponent_threats)}\n"
         if opponent_threats
-        else ""
-    )
-    facts_line = (
-        "Verified move facts:\n" + "\n".join(f"- {f}" for f in facts) + "\n" if facts else ""
-    )
-    fen_line = f"FEN: {fen}\n" if fen else ""
-    board_section = (
-        f"Board position before the move:\n{board_ascii_str}\n{fen_line}\n"
-        if board_ascii_str
         else ""
     )
     cct_line = ""
     if cct:
-        parts = []
-        if cct.get("checks"):
-            parts.append(f"Checks: {', '.join(cct['checks'])}")
-        if cct.get("captures"):
-            parts.append(f"Captures: {', '.join(cct['captures'])}")
-        if cct.get("threats"):
-            parts.append(f"Threats: {', '.join(cct['threats'])}")
-        if parts:
-            cct_line = "Tactical options (CCT): " + " | ".join(parts) + "\n"
+        cct_str = _cct_inline(cct)
+        if cct_str != "none":
+            cct_line = f"Your tactical options (CCT): {cct_str}\n"
+
+    move_section = move_header + best_line + candidates_line + threats_line + cct_line
+
+    # --- Section 4: Position after your move ---
+    after_section = ""
+    if fen and san:
+        try:
+            board_after = chess.Board(fen)
+            board_after.push_san(san)
+            after_ascii = board_ascii(board_after)
+            after_fen_line = f"FEN: {board_after.fen()}\n"
+            after_ctx_text = format_position_context(compute_position_context(board_after))
+            after_ctx_text = after_ctx_text.replace(
+                "## Position Context", "## Position Context after your move", 1
+            )
+            after_section = (
+                f"## Position after your move\n\n{after_ascii}\n{after_fen_line}\n"
+                f"{after_ctx_text}\n"
+            )
+        except Exception:
+            pass
+
+    # --- Section 5: Continuation Tree ---
+    tree_section = ""
+    if move_tree:
+        tree_section = _render_move_tree(move_tree, san) + "\n\n"
+
+    # --- Section 6: Coaching Task ---
+    task_section = (
+        "## Coaching Task\n\n"
+        "Explain the chess idea behind this move in 4-6 sentences. "
+        "Cover the immediate tactical or positional purpose, the strategic plan it supports, "
+        "and any relevant opening theory, piece activity, pawn structure, or king safety considerations."
+    )
 
     return (
-        f"{board_section}"
-        f"Move played: {san}\n"
-        f"Classification: {classification}\n"
-        f"Engine evaluation before move: {eval_str}\n"
-        f"{best_line}"
-        f"{candidates_line}"
-        f"{threats_line}"
-        f"{cct_line}"
-        f"{facts_line}"
-        "\nExplain the chess idea behind this move in 4-6 sentences. "
-        "Cover the immediate tactical or positional purpose, the strategic plan it supports, "
-        "and any relevant opening theory, piece activity, pawn structure, or king safety considerations. "
-        "If verified move facts are listed, do not contradict them."
+        f"{position_section}{ctx_section}{move_section}\n"
+        f"{after_section}{tree_section}{task_section}"
     )

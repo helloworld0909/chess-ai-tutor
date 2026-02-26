@@ -247,11 +247,12 @@ def test_format_training_sample_user_has_classification():
     assert "Classification: Blunder" in user
 
 
-def test_format_training_sample_assistant_has_think_block():
+def test_format_training_sample_assistant_has_no_think_block():
+    # thinking_text is stripped from the assistant — only coaching text is kept
     sample = format_training_sample(_make_augmented_sample(thinking_text="Let me analyze this."))
     assistant = sample["messages"][2]["content"]
-    assert "<think>" in assistant
-    assert "Let me analyze this." in assistant
+    assert "<think>" not in assistant
+    assert "Good opening move controlling the center." in assistant
 
 
 def test_format_training_sample_no_think_when_empty():
@@ -504,8 +505,3 @@ def test_skip_cache_coexists_with_normal_entries(tmp_path: Path):
     assert "coaching" not in cache[skip_key]
     assert cache[normal_key]["coaching"] == "Great move!"
     assert cache[normal_key].get("_skip") is None
-
-
-
-
-

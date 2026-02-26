@@ -28,10 +28,10 @@ lora:
 training:
   train_file: data/processed/train.jsonl
   eval_file: data/processed/eval.jsonl
-  max_seq_length: 4096
+  max_seq_length: 2304
   packing: false
 
-  per_device_train_batch_size: 6
+  per_device_train_batch_size: 5
   per_device_eval_batch_size: 2
   gradient_accumulation_steps: 8
 
@@ -51,10 +51,10 @@ training:
 
   logging_steps: 10
   eval_strategy: steps
-  eval_steps: 200
+  eval_steps: 50
   save_strategy: steps
-  save_steps: 100
-  save_total_limit: 5
+  save_steps: 50
+  save_total_limit: 10
 
   seed: 42
 

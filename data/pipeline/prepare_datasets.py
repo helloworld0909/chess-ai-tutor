@@ -35,6 +35,15 @@ import chess.pgn
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from chess_mcp.stockfish import Stockfish
+from tutor.analysis import (
+    TreeNode,
+    build_move_tree,
+    compute_cct,
+    compute_position_context,
+    format_score,
+    tree_node_from_dict,
+    tree_node_to_dict,
+)
 from tutor.prompts import (
     SYSTEM_PROMPT,
     TEXTBOOK_FEW_SHOT,
@@ -42,7 +51,6 @@ from tutor.prompts import (
     board_ascii,
     format_textbook_prompt,
     format_user_prompt,
-    move_facts,
 )
 from tutor.tools import CHESS_TOOLS
 from tutor.tools import web_search as _web_search
@@ -88,6 +96,8 @@ class AugmentedSample:
         default_factory=dict
     )  # {"checks": [...], "captures": [...], "threats": [...]}
     tool_messages: list[dict] = field(default_factory=list)  # intermediate tool call turns
+    move_tree: list[TreeNode] = field(default_factory=list)  # 3-level response tree
+    position_context: dict = field(default_factory=dict)  # positional/structural/phase context
 
 
 # ---------------------------------------------------------------------------
@@ -540,72 +550,7 @@ def _classify_cp_loss(cp_loss: int) -> str:
     return "Blunder"
 
 
-def _format_score(value: int, is_mate: bool) -> str:
-    """Format a centipawn or mate score for display."""
-    if is_mate:
-        return f"M{abs(value)}" if value > 0 else f"-M{abs(value)}"
-    return f"{value / 100:+.2f}"
-
-
-_PIECE_VALUES = {
-    chess.PAWN: 1,
-    chess.KNIGHT: 3,
-    chess.BISHOP: 3,
-    chess.ROOK: 5,
-    chess.QUEEN: 9,
-    chess.KING: 0,
-}
-
-
-def compute_cct(board: chess.Board) -> dict[str, list[str]]:
-    """Compute Check / Capture / Threat moves available to the side to move.
-
-    - checks:   legal moves that immediately give check
-    - captures: legal moves that capture an opponent piece
-    - threats:  non-check, non-capture moves that attack an undefended
-                opponent piece of strictly higher value than the attacker
-    """
-    side = board.turn
-    opp = not side
-
-    checks: list[str] = []
-    captures: list[str] = []
-    threats: list[str] = []
-
-    for move in board.legal_moves:
-        is_check = board.gives_check(move)
-        is_capture = board.is_capture(move)
-
-        if is_check:
-            checks.append(board.san(move))
-        elif is_capture:
-            captures.append(board.san(move))
-        else:
-            # Threat: after the move, does it attack an undefended opponent piece
-            # worth strictly more than the attacker?
-            attacker_piece = board.piece_at(move.from_square)
-            attacker_val = _PIECE_VALUES.get(attacker_piece.piece_type, 0) if attacker_piece else 0
-
-            board.push(move)
-            for sq in chess.SQUARES:
-                target = board.piece_at(sq)
-                if target and target.color == opp:
-                    target_val = _PIECE_VALUES.get(target.piece_type, 0)
-                    if target_val > attacker_val and board.is_attacked_by(side, sq):
-                        if not board.is_attacked_by(opp, sq):
-                            threats.append(board.peek().uci())  # store as uci, convert below
-                            break
-            board.pop()
-
-    # Convert threat ucis back to SAN using the original board
-    threat_sans: list[str] = []
-    for uci in threats:
-        try:
-            threat_sans.append(board.san(chess.Move.from_uci(uci)))
-        except Exception:
-            pass
-
-    return {"checks": checks[:5], "captures": captures[:5], "threats": threat_sans[:5]}
+# format_score, compute_cct, TreeNode, build_move_tree imported from tutor.analysis
 
 
 async def _analyze_one(
@@ -623,7 +568,7 @@ async def _analyze_one(
 
     analysis = await engine.analyze(sample.fen, depth=depth, multipv=3)
     score = analysis.score
-    eval_str = _format_score(
+    eval_str = format_score(
         score.mate_in if score.mate_in is not None else (score.centipawns or 0),
         score.mate_in is not None,
     )
@@ -635,7 +580,7 @@ async def _analyze_one(
             m = chess.Move.from_uci(line.best_move)
             s = board.san(m)
             ls = line.score
-            sc = _format_score(
+            sc = format_score(
                 ls.mate_in if ls.mate_in is not None else (ls.centipawns or 0),
                 ls.mate_in is not None,
             )
@@ -663,6 +608,16 @@ async def _analyze_one(
         opponent_threats = []
 
     cct = compute_cct(board)
+    pos_ctx = compute_position_context(board)
+
+    # Build 3-level continuation tree (13 Stockfish calls, depth=12 for speed)
+    board_after = board.copy()
+    board_after.push(chess.Move.from_uci(sample.move_uci))
+    try:
+        move_tree = await build_move_tree(engine, board_after, depth=min(depth, 12))
+    except Exception as e:
+        logger.warning("Move tree build failed for %s: %s", sample.move_uci, e)
+        move_tree = []
 
     return AugmentedSample(
         fen=sample.fen,
@@ -678,6 +633,8 @@ async def _analyze_one(
         candidates=candidates,
         opponent_threats=opponent_threats,
         cct=cct,
+        move_tree=move_tree,
+        position_context=pos_ctx,
     )
 
 
@@ -707,8 +664,9 @@ async def augment_samples(
         if cache:
             logger.info("Loaded %d cached augmentations", len(cache))
 
-    # Pre-compute cache keys; separate hits from misses
-    keys = [hashlib.md5(f"{s.fen}:{s.move_uci}".encode()).hexdigest() for s in samples]
+    # Pre-compute cache keys; separate hits from misses.
+    # v3: includes position_context — old entries won't match, forcing regeneration.
+    keys = [hashlib.md5(f"v3:{s.fen}:{s.move_uci}".encode()).hexdigest() for s in samples]
     todo_indices = [i for i, k in enumerate(keys) if k not in cache]
     logger.info(
         "Cache: %d hits, %d to augment",
@@ -738,6 +696,8 @@ async def augment_samples(
                 candidates=entry["candidates"],
                 opponent_threats=entry["opponent_threats"],
                 cct=entry.get("cct", {}),
+                move_tree=[tree_node_from_dict(n) for n in entry.get("move_tree", [])],
+                position_context=entry.get("position_context", {}),
             )
 
     if todo_indices:
@@ -773,6 +733,8 @@ async def augment_samples(
                                     "candidates": aug.candidates,
                                     "opponent_threats": aug.opponent_threats,
                                     "cct": aug.cct,
+                                    "move_tree": [tree_node_to_dict(n) for n in aug.move_tree],
+                                    "position_context": aug.position_context,
                                 }
                                 async with cache_lock:
                                     cache_file.write(json.dumps(entry) + "\n")
@@ -953,7 +915,7 @@ class StockfishPool:
                 sf.analyze(fen, depth=self._depth, multipv=multipv), timeout=30.0
             )
             sc = analysis.score
-            eval_str = _format_score(
+            eval_str = format_score(
                 sc.mate_in if sc.mate_in is not None else (sc.centipawns or 0),
                 sc.mate_in is not None,
             )
@@ -966,7 +928,7 @@ class StockfishPool:
                 try:
                     m = chess.Move.from_uci(line.best_move)
                     ls = line.score
-                    lsc = _format_score(
+                    lsc = format_score(
                         ls.mate_in if ls.mate_in is not None else (ls.centipawns or 0),
                         ls.mate_in is not None,
                     )
@@ -1025,7 +987,6 @@ async def _coach_one(
     has_prior_thinking = bool(aug.thinking_text)
 
     board = chess.Board(aug.fen)
-    facts = move_facts(board, chess.Move.from_uci(aug.move_uci))
 
     # Compute the FEN after the move so the LLM can analyze the resulting position
     board_after = board.copy()
@@ -1044,7 +1005,6 @@ async def _coach_one(
             classification=aug.classification,
             eval_str=aug.eval_str,
             expert_annotation=aug.coaching_text,
-            facts=None,  # expert annotation is ground truth; mechanical facts would override intent
             fen=aug.fen,
         )
         few_shot: list[dict] = []
@@ -1090,9 +1050,10 @@ async def _coach_one(
             cp_loss=aug.cp_loss,
             candidates=aug.candidates,
             opponent_threats=aug.opponent_threats,
-            facts=facts,
             fen=aug.fen,
             cct=aug.cct or {},
+            move_tree=aug.move_tree or [],
+            position_context=aug.position_context or {},
         )
         # Phase-specific tool directive
         if phase == "opening":
@@ -1394,6 +1355,8 @@ async def generate_coaching_with_llm(
             await asyncio.sleep(60)
             done = done_count[0]
             generated = generated_count[0]
+            if done >= total:
+                return
             if generated == 0:
                 continue
             elapsed = _time.monotonic() - start_time[0]
@@ -1411,8 +1374,6 @@ async def generate_coaching_with_llm(
                 gen_rate,
                 eta_str,
             )
-            if done >= total:
-                return
 
     await asyncio.gather(
         producer(),
@@ -1442,7 +1403,6 @@ def format_training_sample(aug: AugmentedSample) -> dict:
     at inference time, via the shared format_user_prompt() function.
     """
     board = chess.Board(aug.fen)
-    facts = move_facts(board, chess.Move.from_uci(aug.move_uci))
 
     user_prompt = format_user_prompt(
         board_ascii_str=board_ascii(board),
@@ -1453,8 +1413,10 @@ def format_training_sample(aug: AugmentedSample) -> dict:
         cp_loss=aug.cp_loss,
         candidates=aug.candidates,
         opponent_threats=aug.opponent_threats,
-        facts=facts,
         fen=aug.fen,
+        cct=aug.cct or {},
+        move_tree=aug.move_tree or [],
+        position_context=aug.position_context or {},
     )
 
     # Build coaching text: use provided text; last-resort fallback only
@@ -1463,11 +1425,7 @@ def format_training_sample(aug: AugmentedSample) -> dict:
         # Should rarely happen — use a minimal classification-grounded line
         coaching = f"{aug.move_san} is the {aug.classification.lower()} move in this position."
 
-    # Build assistant response with optional thinking
-    if aug.thinking_text:
-        assistant = f"<think>{aug.thinking_text}</think>\n\n{coaching}"
-    else:
-        assistant = coaching
+    assistant = coaching
 
     return {
         "messages": [
@@ -1631,7 +1589,7 @@ async def run_pipeline(
 
     # Phase 2.5: LLM coaching generation (optional)
     if llm_coach:
-        llm_cache = output_dir / ".llm_coaching_cache_qwen35.jsonl"
+        llm_cache = output_dir / ".llm_coaching_cache.jsonl"
         augmented = await generate_coaching_with_llm(
             augmented,
             llm_base_url=llm_base_url,

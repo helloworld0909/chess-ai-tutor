@@ -369,62 +369,6 @@ def test_board_ascii_black_to_move():
     assert "Black to move" in result
 
 
-# ── _move_facts ───────────────────────────────────────────────────────────────
-
-
-def test_move_facts_capture():
-    import chess
-
-    from tutor.prompts import move_facts as _move_facts
-
-    # 1.e4 d5 — white can capture exd5
-    board = chess.Board("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2")
-    facts = _move_facts(board, chess.Move.from_uci("e4d5"))
-    assert any("captures pawn" in f for f in facts)
-
-
-def test_move_facts_check():
-    import chess
-
-    from tutor.prompts import move_facts as _move_facts
-
-    # White rook on a1, black king on h8, white king on h1 — Ra8 gives check along rank 8
-    board = chess.Board("7k/8/8/8/8/8/8/R6K w - - 0 1")
-    facts = _move_facts(board, chess.Move.from_uci("a1a8"))
-    assert any("check" in f for f in facts)
-
-
-def test_move_facts_castling():
-    import chess
-
-    from tutor.prompts import move_facts as _move_facts
-
-    # Standard kingside castling position
-    board = chess.Board("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
-    facts = _move_facts(board, chess.Move.from_uci("e1g1"))
-    assert any("castles" in f for f in facts)
-
-
-def test_move_facts_returns_list_for_quiet_move():
-    import chess
-
-    from tutor.prompts import move_facts as _move_facts
-
-    facts = _move_facts(chess.Board(), chess.Move.from_uci("e2e4"))
-    assert isinstance(facts, list)
-
-
-def test_move_facts_no_facts_for_missing_piece():
-    import chess
-
-    from tutor.prompts import move_facts as _move_facts
-
-    # Empty board — no piece on e2, should return []
-    board = chess.Board("8/8/8/8/8/8/8/K6k w - - 0 1")
-    facts = _move_facts(board, chess.Move.from_uci("e2e4"))
-    assert facts == []
-
-
 # ── board_ascii in LLM prompt ─────────────────────────────────────────────────
 
 
@@ -446,8 +390,8 @@ def test_analyze_llm_prompt_includes_board(client: TestClient):
     assert "a b c d e f g h" in user_content
 
 
-def test_analyze_llm_prompt_includes_move_facts(client: TestClient):
-    """LLM user message includes the verified move facts section."""
+def test_analyze_llm_prompt_includes_before_after(client: TestClient):
+    """LLM user message includes both before and after position sections."""
     mock_llm = MagicMock()
     mock_response = MagicMock()
     mock_response.choices[0].message.content = "Good."
@@ -456,10 +400,10 @@ def test_analyze_llm_prompt_includes_move_facts(client: TestClient):
     web_module._llm_client = mock_llm
     web_module._llm_model = "test-model"
 
-    # exd5 — a capture, so move facts will be non-empty
-    fen = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2"
-    client.post("/api/analyze", json={"fen": fen, "move_uci": "e4d5"})
+    client.post("/api/analyze", json={"fen": STARTING_FEN, "move_uci": "e2e4"})
 
     messages = mock_llm.chat.completions.create.call_args.kwargs["messages"]
     user_content = next(m["content"] for m in messages if m["role"] == "user")
-    assert "Verified move facts" in user_content
+    assert "## Position before your move" in user_content
+    assert "## Position after your move" in user_content
+    assert "Verified Move Facts" not in user_content

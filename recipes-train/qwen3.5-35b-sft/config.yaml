@@ -79,7 +79,7 @@ output_dir: checkpoints/chess-tutor-35b-sft-v1
 # DeepSpeed (optional)
 deepspeed:
   enabled: false
-  config_file: training/configs/ds_zero2.json
+  config_file: recipes-train/ds_zero2.json
 
 # Wandb
 wandb:

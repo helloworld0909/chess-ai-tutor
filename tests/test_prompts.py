@@ -11,7 +11,6 @@ from tutor.prompts import (
     SYSTEM_PROMPT,
     board_ascii,
     format_user_prompt,
-    move_facts,
 )
 
 # ── board_ascii ───────────────────────────────────────────────────────────────
@@ -40,38 +39,6 @@ def test_board_ascii_black_to_move():
     assert "Black to move" in result
 
 
-# ── move_facts ────────────────────────────────────────────────────────────────
-
-
-def test_move_facts_capture():
-    board = chess.Board("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2")
-    facts = move_facts(board, chess.Move.from_uci("e4d5"))
-    assert any("captures pawn" in f for f in facts)
-
-
-def test_move_facts_check():
-    board = chess.Board("7k/8/8/8/8/8/8/R6K w - - 0 1")
-    facts = move_facts(board, chess.Move.from_uci("a1a8"))
-    assert any("check" in f for f in facts)
-
-
-def test_move_facts_castling():
-    board = chess.Board("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
-    facts = move_facts(board, chess.Move.from_uci("e1g1"))
-    assert any("castles" in f for f in facts)
-
-
-def test_move_facts_returns_list_for_quiet_move():
-    facts = move_facts(chess.Board(), chess.Move.from_uci("e2e4"))
-    assert isinstance(facts, list)
-
-
-def test_move_facts_empty_for_missing_piece():
-    board = chess.Board("8/8/8/8/8/8/8/K6k w - - 0 1")
-    facts = move_facts(board, chess.Move.from_uci("e2e4"))
-    assert facts == []
-
-
 # ── format_user_prompt ────────────────────────────────────────────────────────
 
 
@@ -84,7 +51,7 @@ def test_format_user_prompt_includes_board():
         eval_str="+0.35",
     )
     assert "a b c d e f g h" in prompt
-    assert "Move played: e4" in prompt
+    assert "Move: e4" in prompt
     assert "Classification: Best" in prompt
 
 
@@ -96,7 +63,7 @@ def test_format_user_prompt_includes_candidates():
         eval_str="+0.20",
         candidates=["Nf3 (+0.20)", "d4 (+0.18)", "e4 (+0.15)"],
     )
-    assert "Engine's top candidates: Nf3" in prompt
+    assert "Engine top candidates: Nf3" in prompt
 
 
 def test_format_user_prompt_includes_threats():
@@ -107,19 +74,7 @@ def test_format_user_prompt_includes_threats():
         eval_str="+0.10",
         opponent_threats=["Bg4"],
     )
-    assert "Opponent's threats if you passed: Bg4" in prompt
-
-
-def test_format_user_prompt_includes_facts():
-    prompt = format_user_prompt(
-        board_ascii_str="",
-        san="exd5",
-        classification="Best",
-        eval_str="+0.50",
-        facts=["captures pawn on d5"],
-    )
-    assert "Verified move facts:" in prompt
-    assert "- captures pawn on d5" in prompt
+    assert "Opponent threats if you passed: Bg4" in prompt
 
 
 def test_format_user_prompt_best_line_only_when_cp_loss():
@@ -130,7 +85,7 @@ def test_format_user_prompt_best_line_only_when_cp_loss():
         eval_str="+0.35",
         cp_loss=0,
     )
-    assert "Engine's best move was" not in prompt_best
+    assert "Engine best was" not in prompt_best
 
     prompt_bad = format_user_prompt(
         board_ascii_str="",
@@ -140,7 +95,7 @@ def test_format_user_prompt_best_line_only_when_cp_loss():
         best_move="e4",
         cp_loss=200,
     )
-    assert "Engine's best move was: e4" in prompt_bad
+    assert "Engine best was: e4" in prompt_bad
 
 
 def test_format_user_prompt_ends_with_instruction():
@@ -150,9 +105,29 @@ def test_format_user_prompt_ends_with_instruction():
         classification="Best",
         eval_str="+0.35",
     )
-    # Depth/length guidance now lives in SYSTEM_PROMPT (phase-aware); the user
-    # prompt still ends with a coaching instruction.
     assert "chess idea" in prompt or "Explain" in prompt
+
+
+def test_format_user_prompt_has_before_after_sections():
+    prompt = format_user_prompt(
+        board_ascii_str=board_ascii(chess.Board()),
+        san="e4",
+        classification="Best",
+        eval_str="+0.35",
+        fen=chess.STARTING_FEN,
+    )
+    assert "## Position before your move" in prompt
+    assert "## Position after your move" in prompt
+
+
+def test_format_user_prompt_no_verified_facts_section():
+    prompt = format_user_prompt(
+        board_ascii_str="",
+        san="e4",
+        classification="Best",
+        eval_str="+0.35",
+    )
+    assert "Verified Move Facts" not in prompt
 
 
 # ── SYSTEM_PROMPT ─────────────────────────────────────────────────────────────

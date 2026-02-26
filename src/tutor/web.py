@@ -22,11 +22,11 @@ from pydantic import BaseModel
 
 from chess_mcp.representations import render_board_svg
 from chess_mcp.stockfish import Stockfish
+from tutor.analysis import build_move_tree, compute_cct, compute_position_context, format_score
 from tutor.prompts import (
     SYSTEM_PROMPT,
     board_ascii,
     format_user_prompt,
-    move_facts,
 )
 from tutor.tools import CHESS_TOOLS
 from tutor.tools import web_search as _web_search
@@ -178,9 +178,11 @@ async def _llm_comment(
     eval_str: str,
     candidates: list[str],
     opponent_threats: list[str],
-    move_facts_list: list[str] | None = None,
     board_ascii_str: str = "",
     fen: str = "",
+    cct: dict[str, list[str]] | None = None,
+    move_tree: list[Any] | None = None,
+    position_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Get an AI-generated comment for a move using a tool-calling loop.
 
@@ -204,8 +206,10 @@ async def _llm_comment(
         cp_loss=cp_loss,
         candidates=candidates,
         opponent_threats=opponent_threats,
-        facts=move_facts_list,
         fen=fen,
+        cct=cct,
+        move_tree=move_tree,
+        position_context=position_context,
     )
 
     logger.debug(
@@ -224,10 +228,10 @@ async def _llm_comment(
     try:
         for _ in range(6):  # up to 4 tool calls + 1 answer + 1 safety
             response = await asyncio.wait_for(
-                _llm_client.chat.completions.create(
+                _llm_client.chat.completions.create(  # type: ignore[call-overload]
                     model=_llm_model,
-                    messages=messages,  # type: ignore[arg-type]
-                    tools=CHESS_TOOLS,  # type: ignore[arg-type]
+                    messages=messages,
+                    tools=CHESS_TOOLS,
                     tool_choice="auto",
                     max_tokens=8192,
                     temperature=0.7,
@@ -272,7 +276,7 @@ async def _llm_comment(
                                 )
                                 result_str = _json.dumps(
                                     {
-                                        "eval": _format_score(
+                                        "eval": format_score(
                                             analysis.score.mate_in
                                             if analysis.score.mate_in is not None
                                             else (analysis.score.centipawns or 0),
@@ -301,10 +305,7 @@ async def _llm_comment(
     return _generate_comment(san, classification, best_move, cp_loss == 0), "template"
 
 
-def _format_score(value: int, is_mate: bool) -> str:
-    if is_mate:
-        return f"M{abs(value)}" if value > 0 else f"-M{abs(value)}"
-    return f"{value / 100:+.2f}"
+# format_score imported from tutor.analysis
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +395,7 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
         _stockfish.get_threats(req.fen),
     )
     score = analysis.score
-    eval_str = _format_score(
+    eval_str = format_score(
         score.mate_in if score.mate_in is not None else (score.centipawns or 0),
         score.mate_in is not None,
     )
@@ -406,7 +407,7 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
         try:
             move_san = board.san(chess.Move.from_uci(line.best_move))
             cp = line.score.centipawns
-            score_str = _format_score(
+            score_str = format_score(
                 line.score.mate_in if line.score.mate_in is not None else (cp or 0),
                 line.score.mate_in is not None,
             )
@@ -434,11 +435,24 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
     except Exception:
         san = req.move_uci
 
-    # Compute verified move facts from python-chess (grounded, no hallucination)
+    # Compute CCT and positional context for the position before the move
     try:
-        facts = move_facts(board, chess.Move.from_uci(req.move_uci))
+        cct = compute_cct(board)
     except Exception:
-        facts = []
+        cct = {}
+
+    try:
+        pos_ctx = compute_position_context(board)
+    except Exception:
+        pos_ctx = {}
+
+    # Build 3-level continuation tree (depth=12 to keep inference latency reasonable)
+    board_after = board.copy()
+    board_after.push(chess.Move.from_uci(req.move_uci))
+    try:
+        move_tree = await build_move_tree(_stockfish, board_after, depth=12)
+    except Exception:
+        move_tree = []
 
     comment, comment_source = await _llm_comment(
         san,
@@ -448,9 +462,11 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
         eval_str,
         candidates,
         opponent_threats,
-        move_facts_list=facts,
         board_ascii_str=board_ascii(board),
         fen=req.fen,
+        cct=cct,
+        move_tree=move_tree,
+        position_context=pos_ctx,
     )
 
     return AnalyzeResponse(
