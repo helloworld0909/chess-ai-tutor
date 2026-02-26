@@ -7,8 +7,6 @@ Usage:
     torchrun --nproc_per_node=2 training/train.py --config training/configs/qwen3.5_35b.yaml
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -19,6 +17,30 @@ from typing import Optional
 import torch
 import yaml
 from datasets import Dataset
+
+# ── caching_allocator_warmup monkey-patch ────────────────────────────────────
+# transformers 5.0+ runs caching_allocator_warmup() which pre-allocates up to
+# half the GPU VRAM before the quantized model has been created. With QLoRA
+# (4-bit) on 32 GiB GPUs this causes an OOM before any training weights are
+# ever loaded. Replacing with a no-op is safe — the CUDA caching allocator
+# will grow on-demand instead.
+try:
+    import transformers.modeling_utils as _mu
+
+    def _noop_warmup(*args, **kwargs):  # noqa: D401
+        pass
+
+    _mu.caching_allocator_warmup = _noop_warmup
+    logger_warmup = logging.getLogger(__name__).getChild("patch")
+    logger_warmup.info("caching_allocator_warmup patched to no-op (OOM prevention)")
+
+    import transformers.core_model_loading as _cml
+
+    _cml.GLOBAL_WORKERS = 1
+    logger_warmup.info("GLOBAL_WORKERS patched to 1 (serialized loading for OOM prevention)")
+except Exception:
+    pass
+# ─────────────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,8 +95,9 @@ def load_config(config_path: str) -> dict:
 
 
 def load_jsonl(path: str) -> Dataset:
-    """Load JSONL file, keeping only samples with a 'messages' field."""
+    """Load JSONL file, keeping only samples with source='textbook'."""
     data = []
+    total_found = 0
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -82,11 +105,14 @@ def load_jsonl(path: str) -> Dataset:
                 continue
             try:
                 sample = json.loads(line)
-                if "messages" in sample:
-                    data.append({"messages": sample["messages"]})
+                total_found += 1
+                metadata = sample.get("metadata", {})
+                if metadata.get("source") == "textbook":
+                    if "messages" in sample:
+                        data.append({"messages": sample["messages"]})
             except json.JSONDecodeError:
                 continue
-    logger.info("Loaded %d samples from %s", len(data), path)
+    logger.info("Loaded %d textbook samples (out of %d total) from %s", len(data), total_found, path)
     return Dataset.from_list(data)
 
 
@@ -150,16 +176,15 @@ def format_dataset(dataset: Dataset, tokenizer) -> Dataset:
 def setup_model_and_tokenizer(model_args: ModelArguments):
     """Load model with QLoRA and tokenizer.
 
-    Uses LOCAL_RANK from the environment so each torchrun process loads
-    its own model copy onto its assigned GPU (standard DDP + QLoRA pattern).
+    Uses device_map='auto' to split the model across all available GPUs
+    within a single process. This is model-parallel (pipeline-style) rather
+    than DDP — so train.sh must use --nproc_per_node=1.
 
     Returns:
         Tuple of (model, tokenizer)
     """
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
     # --- Tokenizer ---
     tokenizer = AutoTokenizer.from_pretrained(
@@ -183,16 +208,41 @@ def setup_model_and_tokenizer(model_args: ModelArguments):
         bnb_config = BitsAndBytesConfig(load_in_8bit=True)
 
     # --- Model ---
-    # device_map={"": local_rank} pins each process's model copy to its GPU.
-    # Do NOT use device_map="auto" with torchrun DDP — it conflicts with
-    # HF Trainer's device assignment.
+    # Detect DDP (Distributed Data Parallel) from environment
+    import os
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_distributed = local_rank != -1
+
+    if is_distributed:
+        logger.info("Distributed training detected (LOCAL_RANK=%d). Disabling device_map.", local_rank)
+        device_map = None  # Trainer will handle device placement
+    else:
+        # Single-process logic (supports device_map for multiple GPUs if not in DDP)
+        from transformers import AutoConfig
+        hf_cfg = AutoConfig.from_pretrained(model_args.model_name, trust_remote_code=True)
+        text_cfg = getattr(hf_cfg, "text_config", hf_cfg)
+        n_layers = text_cfg.num_hidden_layers
+        
+        # Heuristic for POC vs Production scale
+        is_small_model = getattr(text_cfg, "hidden_size", 4096) < 4096 or n_layers < 30
+        
+        if is_small_model:
+            logger.info("Small model detected (%d layers). Using device_map='auto'.", n_layers)
+            device_map = "auto"
+        else:
+            split = n_layers // 2
+            device_map = {"model.embed_tokens": 0, "model.norm": 1, "lm_head": 1}
+            for i in range(n_layers):
+                device_map[f"model.layers.{i}"] = 0 if i < split else 1
+            logger.info("Large model detected (%d layers). Using manual split: %d/%d.", n_layers, split, n_layers - split)
+
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name,
         quantization_config=bnb_config,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map={"": local_rank},
-        attn_implementation="flash_attention_2",
+        device_map=device_map,
+        attn_implementation="sdpa",
     )
 
     # Required when using gradient checkpointing with PEFT
@@ -273,7 +323,7 @@ def train(config_path: str):
     wandb_cfg = config.get("wandb", {})
 
     model_args = ModelArguments(
-        model_name=model_cfg.get("name", "Qwen/Qwen3.5-35B-A3B"),
+        model_name=model_cfg.get("model_name", model_cfg.get("name", "Qwen/Qwen3.5-35B-A3B")),
         quantization=model_cfg.get("quantization", "4bit"),
         lora_r=lora_cfg.get("r", 64),
         lora_alpha=lora_cfg.get("alpha", 128),
@@ -313,10 +363,8 @@ def train(config_path: str):
         gradient_checkpointing_kwargs={"use_reentrant": False},
         seed=train_cfg.get("seed", 42),
         dataloader_num_workers=train_cfg.get("dataloader_num_workers", 4),
-        group_by_length=train_cfg.get("group_by_length", False),
         report_to="wandb" if wandb_cfg.get("enabled") else "none",
         deepspeed=deepspeed_path,
-        ddp_find_unused_parameters=False,
     )
 
     # --- Wandb ---

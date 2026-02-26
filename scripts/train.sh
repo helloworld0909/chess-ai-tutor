@@ -12,9 +12,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Activate project venv so torchrun / training deps are on PATH
+# shellcheck disable=SC1091
+source "$REPO_ROOT/.venv/bin/activate"
+
+# Avoid OOM from caching_allocator_warmup in transformers 5.x
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+# Suppress non-actionable advisory warnings
+export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+
 # Default values
 CONFIG="training/configs/qwen3.5_35b.yaml"
-NPROC=2
+NPROC=1  # model-parallel (device_map=auto) — single process spans both GPUs
 EXTRA_ARGS=()
 USE_DEEPSPEED=false
 
@@ -40,9 +49,15 @@ echo "[train.sh] Config : $CONFIG"
 echo "[train.sh] Devices: $NPROC GPUs"
 echo ""
 
-torchrun \
-  --standalone \
-  --nproc_per_node="$NPROC" \
-  training/train.py \
-  --config "$CONFIG" \
-  "${EXTRA_ARGS[@]}"
+# Start training
+if [ "$NPROC" -gt 1 ]; then
+    echo "[train.sh] Launching with torchrun (DDP) on $NPROC GPUs"
+    torchrun --nproc_per_node="$NPROC" training/train.py \
+        --config "$CONFIG" \
+        "${EXTRA_ARGS[@]}"
+else
+    echo "[train.sh] Launching with python3 (single process)"
+    python3 training/train.py \
+        --config "$CONFIG" \
+        "${EXTRA_ARGS[@]}"
+fi

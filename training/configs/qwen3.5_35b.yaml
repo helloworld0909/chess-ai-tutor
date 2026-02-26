@@ -3,12 +3,12 @@
 
 # Model settings
 model:
-  # Use the instruct/thinking variant so the model already knows <think> format.
-  # Use the BF16 HuggingFace checkpoint for training (not the FP8 inference quant).
-  name: Qwen/Qwen3.5-35B-A3B
-  quantization: 4bit        # nf4 QLoRA — fits per GPU on RTX 5090 (32 GB)
+model:
+  # Use the BF16 HuggingFace checkpoint for training
+  model_name: "Qwen/Qwen3.5-35B-A3B"
+  quantization: "4bit"        # nf4 QLoRA — fits per GPU on RTX 5090 (32 GB)
+  attn_implementation: "sdpa"  # default to sdpa for stability
   torch_dtype: bfloat16
-  attn_implementation: flash_attention_2
 
 # LoRA
 lora:
@@ -31,7 +31,7 @@ training:
   train_file: data/processed/train.jsonl
   eval_file: data/processed/eval.jsonl
   max_seq_length: 8192
-  packing: true             # pack short sequences → better GPU utilisation
+  packing: false             # pack short sequences → better GPU utilisation
 
   # Batch: 1 sample × 16 grad-accum × 2 GPUs = effective batch 32
   per_device_train_batch_size: 1
@@ -78,7 +78,7 @@ deepspeed:
 
 # Wandb
 wandb:
-  enabled: true
+  enabled: false
   project: chess-tutor
   name: qwen3.5-35b-qlora-sft
   tags:
