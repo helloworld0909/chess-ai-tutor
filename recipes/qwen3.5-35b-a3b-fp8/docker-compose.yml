@@ -1,0 +1,42 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:qwen3_5-cu130
+    container_name: chess-ai-vllm-35b
+    restart: on-failure
+    ipc: host
+    ports:
+      - "8100:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ~/.cache/vllm:/root/.cache/vllm
+      - ~/.cache/triton:/root/.triton/cache
+      - ~/.cache/flashinfer:/root/.cache/flashinfer
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - CUDA_VISIBLE_DEVICES=0,1
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    command: >
+      Qwen/Qwen3.5-35B-A3B-FP8
+      --gpu-memory-utilization 0.75
+      --max-model-len 32768
+      --tensor-parallel-size 2
+      --max-num-seqs 64
+      --reasoning-parser qwen3
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --language-model-only
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s

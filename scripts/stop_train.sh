@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gracefully stop a training run started by scripts/train.sh.
+# Gracefully stop a training run started by scripts/start_train.sh.
 #
 # Usage:
 #   ./scripts/stop_train.sh

@@ -2,9 +2,9 @@
 # Launch SFT training with torchrun across 2 GPUs, always as a nohup background process.
 #
 # Usage:
-#   ./scripts/train.sh                                          # default 35B config
-#   ./scripts/train.sh --config training/configs/qwen3_4b.yaml # 4B config
-#   ./scripts/train.sh --deepspeed                              # enable ZeRO-2
+#   ./scripts/start_train.sh                                          # default 35B config
+#   ./scripts/start_train.sh --config training/configs/qwen3_4b.yaml # 4B config
+#   ./scripts/start_train.sh --deepspeed                              # enable ZeRO-2
 #
 # Logs: /tmp/chess-train.log
 # PID:  /tmp/chess-train.pid

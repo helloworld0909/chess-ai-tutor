@@ -180,7 +180,7 @@ def setup_model_and_tokenizer(model_args: ModelArguments):
 
     Uses device_map='auto' to split the model across all available GPUs
     within a single process. This is model-parallel (pipeline-style) rather
-    than DDP — so train.sh must use --nproc_per_node=1.
+    than DDP — so start_train.sh must use --nproc_per_node=1.
 
     Returns:
         Tuple of (model, tokenizer)
@@ -323,7 +323,7 @@ def build_trainer(
     return trainer
 
 
-def train(config_path: str):
+def train(config_path: str, resume_from_checkpoint: str | bool | None = None):
     """Run SFT training from a YAML config file."""
     from transformers import TrainingArguments
 
@@ -411,7 +411,7 @@ def train(config_path: str):
     )
 
     logger.info("Starting training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # --- Save ---
     logger.info("Saving model to %s", training_args.output_dir)
@@ -435,6 +435,14 @@ def main():
     parser.add_argument("--output", help="Override output_dir from config")
     parser.add_argument("--epochs", type=int, help="Override num_train_epochs")
     parser.add_argument("--lr", type=float, help="Override learning_rate")
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const=True,
+        default=None,
+        metavar="CHECKPOINT_DIR",
+        help="Resume from checkpoint. Pass a path, or omit a value to auto-resume from latest.",
+    )
 
     args = parser.parse_args()
     config_path = args.config
@@ -457,7 +465,7 @@ def main():
             yaml.dump(cfg, f)
             config_path = f.name
 
-    train(config_path)
+    train(config_path, resume_from_checkpoint=args.resume)
 
 
 if __name__ == "__main__":

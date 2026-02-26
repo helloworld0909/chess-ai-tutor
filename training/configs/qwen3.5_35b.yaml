@@ -1,26 +1,35 @@
 # Training configuration for Qwen3.5-35B-A3B (text-only)
-# Chess Tutor SFT with QLoRA — 2× RTX 5090
+# Chess Tutor SFT with QLoRA — 2× RTX 5090 (DDP, 4-bit NF4)
+#
+# Memory budget per GPU (DDP — each GPU holds full model):
+#   Weights (4-bit NF4): 35B × 0.5 bytes = ~17.5 GB
+#   LoRA attn+MoE-FFN r=8: ~500 MB (incl. all-expert adapters)
+#   8-bit Adam states:   ~1 GB
+#   Activations (bs=2, gc): ~2 GB
+#   Total: ~21 GB  →  11 GB headroom on 32 GB GPU
+#   (fallback: remove gate/up/down_proj → attn-only ~20 GB)
 
 # Model settings
 model:
-model:
-  # Use the BF16 HuggingFace checkpoint for training
   model_name: "Qwen/Qwen3.5-35B-A3B"
-  quantization: "4bit"        # nf4 QLoRA — fits per GPU on RTX 5090 (32 GB)
-  attn_implementation: "sdpa"  # default to sdpa for stability
+  quantization: "4bit"          # NF4 QLoRA — native BF16 compute, no FP16 cast
+  attn_implementation: "sdpa"
   torch_dtype: bfloat16
 
-# LoRA
+# LoRA — attn projections (all 40 layers: GatedAttention + GatedDeltaNet)
+# + MoE FFN projections (gate/up/down per expert, all layers).
+# r=8 keeps per-expert adapter memory manageable (~500 MB total adapters).
+# If OOM: remove gate_proj / up_proj / down_proj to fall back to attn-only.
 lora:
-  r: 64
-  alpha: 128                # 2×r is standard
+  r: 8
+  alpha: 16                     # 2×r
   dropout: 0.05
   target_modules:
     - q_proj
     - k_proj
     - v_proj
     - o_proj
-    - gate_proj             # MoE routing / MLP gate
+    - gate_proj
     - up_proj
     - down_proj
   bias: none
@@ -30,59 +39,56 @@ lora:
 training:
   train_file: data/processed/train.jsonl
   eval_file: data/processed/eval.jsonl
-  max_seq_length: 8192
-  packing: false             # pack short sequences → better GPU utilisation
+  max_seq_length: 2048          # samples are max ~1.4k tokens; 2048 is ample
+  packing: false                # incompatible with DataCollatorForCompletionOnlyLM
 
-  # Batch: 1 sample × 16 grad-accum × 2 GPUs = effective batch 32
-  per_device_train_batch_size: 1
+  # Effective batch = 2 × 8 grad-accum × 2 GPUs = 32
+  per_device_train_batch_size: 2
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 8
 
-  # Learning rate
-  learning_rate: 1.0e-4
+  learning_rate: 5.0e-5         # lower LR for larger model
   lr_scheduler_type: cosine
   warmup_ratio: 0.03
 
-  # Duration — 3 epochs over ~30k samples
-  num_train_epochs: 3
+  num_train_epochs: 1           # 35B generalises fast; 1 epoch is sufficient
   max_steps: -1
 
-  # Optimisation
   optim: adamw_8bit
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-  # Memory
   gradient_checkpointing: true
   bf16: true
   fp16: false
   dataloader_num_workers: 4
+  ddp_find_unused_parameters: false
 
-  # Checkpointing / logging
   logging_steps: 10
   eval_strategy: steps
-  eval_steps: 200
+  eval_steps: 100
   save_strategy: steps
-  save_steps: 500
-  save_total_limit: 3
+  save_steps: 100
+  save_total_limit: 5
 
   seed: 42
 
 # Output
-output_dir: checkpoints/chess-tutor-sft-v1
+output_dir: checkpoints/chess-tutor-35b-sft-v1
 
-# DeepSpeed (optional — not required for QLoRA + DDP, but saves optimizer memory)
+# DeepSpeed (optional)
 deepspeed:
   enabled: false
   config_file: training/configs/ds_zero2.json
 
 # Wandb
 wandb:
-  enabled: false
+  enabled: true
   project: chess-tutor
-  name: qwen3.5-35b-qlora-sft
+  name: qwen3.5-35b-full-qlora-sft
   tags:
     - chess
     - sft
     - qlora
-    - qwen3
+    - qwen3.5
+    - attn-moe-ffn
