@@ -1,24 +1,29 @@
-"""GRPO training — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=32).
+"""GRPO training — Phase 2 SFT checkpoint + QLoRA (8-bit, r=32).
 
 Stage 1 line generator: teaches the model to produce legally correct engine
 lines with accurate eval labels and structural move annotations.
+
+Starts from Phase 2 SFT checkpoint (checkpoint-350) which already knows the
+output format.  GRPO grounds the annotations with verifiable Stockfish rewards.
 
 Parallelism: single GPU (GRPO rollout generation is the bottleneck, not
 weight updates — DDP adds synchronisation overhead without throughput gain).
 
 Reward functions (Phase 1, all free/cheap):
-    R1  — Move legality          weight 0.25
-    R3  — Eval label accuracy    weight 0.30  (Stockfish depth 18)
-    R4a — Structural annotations weight 0.15  (python-chess, free)
-    R5  — Line relevance         weight 0.10
+    R1  — Move legality          hard gate (-1.0 if illegal, skip rest)
+    R2  — Eval label accuracy    weight 0.28  (Stockfish depth 18)
+    R3a — Structural annotations weight 0.12  (python-chess, free)
+    R4  — Line depth             weight 0.10  (encourages ≥6 half-moves)
+    R5  — Line breadth           weight 0.10  (unique first moves)
+    R6  — Line relevance         weight 0.05  (first move is legal from FEN)
 
 Usage (via recipe):
-    ./recipes-train/qwen3-4b-grpo/start.sh
+    ./recipes-train/qwen3-4b-phase3-grpo/start.sh
 
 Direct:
     STOCKFISH_PATH=/path/to/stockfish \\
-    python recipes-train/qwen3-4b-grpo/train.py \\
-        --config recipes-train/qwen3-4b-grpo/config.yaml
+    python recipes-train/qwen3-4b-phase3-grpo/train.py \\
+        --config recipes-train/qwen3-4b-phase3-grpo/config.yaml
 """
 
 from __future__ import annotations
@@ -188,18 +193,36 @@ def main():
         eval_dataset = load_grpo_dataset(train_cfg["eval_file"])
 
     # ── Reward functions ──────────────────────────────────────────────────
+    # R1 (legality) is a hard gate: illegal completion → -1.0, all others 0.
+    # Implemented by combined_reward; here we pass individual weighted fns to
+    # GRPOTrainer so each reward is logged separately in wandb / stdout.
     from verification.rewards import (
         reward_annotation_structural,
+        reward_breadth,
+        reward_depth,
         reward_eval_accuracy,
         reward_legality,
         reward_relevance,
     )
 
+    def reward_legality_gate(prompts: list, completions: list, **kwargs) -> list[float]:
+        """R1 hard gate: -1.0 per sample with any illegal line, +1.0 otherwise.
+
+        When this fires -1.0, downstream rewards are expected to be near 0
+        (the model gets no learning signal from bad completions).
+        GRPOTrainer sums all reward_fns per sample — a -1.0 gate dominates.
+        """
+        scores = reward_legality(prompts, completions, **kwargs)
+        # Map: score < 0 (any illegal) → hard -1.0;  score >= 0 → +0.0 (gate passes, no bonus)
+        return [-1.0 if s < 0 else 0.0 for s in scores]
+
     reward_fns = [
-        _make_weighted_reward(reward_legality, 0.25),
-        _make_weighted_reward(reward_eval_accuracy, 0.30),
-        _make_weighted_reward(reward_annotation_structural, 0.15),
-        _make_weighted_reward(reward_relevance, 0.10),
+        reward_legality_gate,  # R1: -1.0 gate, not weighted (not a bonus)
+        _make_weighted_reward(reward_eval_accuracy, 0.28),  # R2
+        _make_weighted_reward(reward_annotation_structural, 0.12),  # R3a
+        _make_weighted_reward(reward_depth, 0.10),  # R4
+        _make_weighted_reward(reward_breadth, 0.10),  # R5
+        _make_weighted_reward(reward_relevance, 0.05),  # R6
     ]
 
     # ── GRPOConfig ────────────────────────────────────────────────────────

@@ -481,7 +481,72 @@ def reward_annotation_structural(
 
 
 # ---------------------------------------------------------------------------
-# R5 — Line Relevance
+# R4 — Line Depth
+# ---------------------------------------------------------------------------
+
+# Target half-moves per line — lines shorter than this score less
+_TARGET_DEPTH = 6
+
+
+def reward_depth(
+    prompts: list[list[dict] | str],
+    completions: list[list[dict] | str],
+    **kwargs: Any,
+) -> list[float]:
+    """R4: Reward lines proportional to their depth, capped at _TARGET_DEPTH.
+
+    Score per line = min(len(moves), _TARGET_DEPTH) / _TARGET_DEPTH.
+    Capped at 1.0 so padding beyond target gets no reward.
+    Final score = mean over all parsed lines (or -1.0 if none found).
+    """
+    scores: list[float] = []
+    for prompt, completion in zip(prompts, completions):
+        completion_text = _prompt_str(completion)
+        lines = parse_lines(completion_text)
+        if not lines:
+            scores.append(-1.0)
+            continue
+        line_scores = [min(len(line["moves_san"]), _TARGET_DEPTH) / _TARGET_DEPTH for line in lines]
+        scores.append(sum(line_scores) / len(line_scores))
+    return scores
+
+
+# ---------------------------------------------------------------------------
+# R5 — Line Breadth
+# ---------------------------------------------------------------------------
+
+
+def reward_breadth(
+    prompts: list[list[dict] | str],
+    completions: list[list[dict] | str],
+    **kwargs: Any,
+) -> list[float]:
+    """R5: Reward unique first moves across all parsed lines.
+
+    unique_ratio = len(set(first_moves)) / len(first_moves)
+    +1.0 if all lines start with a different move; lower if transpositions present.
+    Returns -1.0 if no lines found.
+    """
+    scores: list[float] = []
+    for prompt, completion in zip(prompts, completions):
+        prompt_text = _prompt_str(prompt)
+        fen, _ = _extract_context(prompt_text)
+        completion_text = _prompt_str(completion)
+        lines = parse_lines(completion_text)
+        if not lines:
+            scores.append(-1.0)
+            continue
+        first_moves = [line["moves_san"][0] for line in lines if line["moves_san"]]
+        if not first_moves:
+            scores.append(-1.0)
+            continue
+        unique_ratio = len(set(first_moves)) / len(first_moves)
+        scores.append(unique_ratio)
+    return scores
+
+
+# ---------------------------------------------------------------------------
+# R6 — Line Relevance (was R5)
 # ---------------------------------------------------------------------------
 
 
@@ -529,11 +594,15 @@ def reward_relevance(
 # Combined reward (for logging/debugging — GRPOTrainer calls each separately)
 # ---------------------------------------------------------------------------
 
+# Phase 1 weights (all free, no Haiku judge).
+# R1 is a hard gate: illegal → -1.0 and downstream rewards are 0.
+# Remaining weights sum to 0.75, matching TODO_RL.md Phase 1 spec.
 _WEIGHTS = {
-    "legality": 0.25,
-    "eval_accuracy": 0.30,
-    "annotation_structural": 0.15,
-    "relevance": 0.10,
+    "eval_accuracy": 0.28,
+    "annotation_structural": 0.12,
+    "depth": 0.10,
+    "breadth": 0.10,
+    "relevance": 0.05,
 }
 
 
@@ -542,15 +611,31 @@ def combined_reward(
     completions: list[list[dict] | str],
     **kwargs: Any,
 ) -> list[float]:
-    """Phase 1 combined reward (for reference). GRPOTrainer uses individual fns."""
+    """Phase 1 combined reward (for reference). GRPOTrainer uses individual fns.
+
+    R1 (legality) is a hard gate: any illegal completion scores -1.0 immediately,
+    and all downstream rewards are zeroed out for that sample.
+    """
     r1 = reward_legality(prompts, completions, **kwargs)
     r3 = reward_eval_accuracy(prompts, completions, **kwargs)
     r4a = reward_annotation_structural(prompts, completions, **kwargs)
-    r5 = reward_relevance(prompts, completions, **kwargs)
-    return [
-        _WEIGHTS["legality"] * a
-        + _WEIGHTS["eval_accuracy"] * b
-        + _WEIGHTS["annotation_structural"] * c
-        + _WEIGHTS["relevance"] * d
-        for a, b, c, d in zip(r1, r3, r4a, r5)
-    ]
+    r4_depth = reward_depth(prompts, completions, **kwargs)
+    r5_breadth = reward_breadth(prompts, completions, **kwargs)
+    r6 = reward_relevance(prompts, completions, **kwargs)
+
+    results = []
+    for legal, eval_acc, annot, depth, breadth, relevance in zip(
+        r1, r3, r4a, r4_depth, r5_breadth, r6
+    ):
+        if legal < 0:
+            # Hard gate: any illegal line → -1.0, all downstream zeroed
+            results.append(-1.0)
+        else:
+            results.append(
+                _WEIGHTS["eval_accuracy"] * eval_acc
+                + _WEIGHTS["annotation_structural"] * annot
+                + _WEIGHTS["depth"] * depth
+                + _WEIGHTS["breadth"] * breadth
+                + _WEIGHTS["relevance"] * relevance
+            )
+    return results
