@@ -80,7 +80,164 @@ WEB_SEARCH_TOOL: dict = {
     },
 }
 
-CHESS_TOOLS: list[dict] = [ANALYZE_POSITION_TOOL, WEB_SEARCH_TOOL]
+PLAY_MOVES_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "play_moves",
+        "description": (
+            "Apply a sequence of moves to a position and return the resulting FEN. "
+            "Use this to trace a candidate line step-by-step before committing it. "
+            "Returns an error if any move in the sequence is illegal."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fen": {
+                    "type": "string",
+                    "description": "Starting position in FEN notation",
+                },
+                "moves": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Sequence of moves in SAN or UCI notation "
+                        "(e.g. ['e4', 'e5', 'Nf3'] or ['e2e4', 'e7e5'])"
+                    ),
+                },
+            },
+            "required": ["fen", "moves"],
+        },
+    },
+}
+
+GET_TOP_LINES_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "get_top_lines",
+        "description": (
+            "Get Stockfish's top N engine lines from a position. "
+            "Each line includes the move sequence in SAN, depth, and evaluation label. "
+            "Use this to discover the best continuations before writing your lines."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fen": {
+                    "type": "string",
+                    "description": "Position to analyse in FEN notation",
+                },
+                "n": {
+                    "type": "integer",
+                    "description": "Number of top lines to return (1–5, default 5)",
+                    "default": 5,
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Stockfish search depth (default 15)",
+                    "default": 15,
+                },
+            },
+            "required": ["fen"],
+        },
+    },
+}
+
+GET_ATTACKS_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "get_attacks",
+        "description": (
+            "Return which pieces attack a given square and which squares a piece on "
+            "that square attacks. Useful for reasoning about pins, forks, discovered "
+            "attacks, and piece safety."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fen": {
+                    "type": "string",
+                    "description": "Position in FEN notation",
+                },
+                "square": {
+                    "type": "string",
+                    "description": "Square to inspect in algebraic notation (e.g. 'e4', 'd5')",
+                },
+            },
+            "required": ["fen", "square"],
+        },
+    },
+}
+
+FEN_TO_BOARD_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "fen_to_board",
+        "description": (
+            "Convert a FEN string to a human-readable ASCII board diagram. "
+            "Use this to visualise any position during your thinking."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fen": {
+                    "type": "string",
+                    "description": "Position in FEN notation",
+                },
+            },
+            "required": ["fen"],
+        },
+    },
+}
+
+BOARD_TO_FEN_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "board_to_fen",
+        "description": (
+            "Assemble a full FEN string from a piece-placement description. "
+            "Provide the piece placement part (rank 8 to rank 1, slash-separated). "
+            "Side to move, castling, and en-passant are optional."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "placement": {
+                    "type": "string",
+                    "description": (
+                        "Piece placement string "
+                        "(e.g. 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR')"
+                    ),
+                },
+                "side_to_move": {
+                    "type": "string",
+                    "description": "'w' for White, 'b' for Black (default 'w')",
+                    "default": "w",
+                },
+                "castling": {
+                    "type": "string",
+                    "description": "Castling availability (e.g. 'KQkq', '-'). Default '-'.",
+                    "default": "-",
+                },
+                "en_passant": {
+                    "type": "string",
+                    "description": "En-passant target square (e.g. 'e3') or '-'. Default '-'.",
+                    "default": "-",
+                },
+            },
+            "required": ["placement"],
+        },
+    },
+}
+
+CHESS_TOOLS: list[dict] = [
+    ANALYZE_POSITION_TOOL,
+    WEB_SEARCH_TOOL,
+    PLAY_MOVES_TOOL,
+    GET_TOP_LINES_TOOL,
+    GET_ATTACKS_TOOL,
+    FEN_TO_BOARD_TOOL,
+    BOARD_TO_FEN_TOOL,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +371,236 @@ async def web_search(query: str) -> str:
     if not results:
         return json.dumps({"error": "No results found", "query": query})
     return json.dumps(results[:5])
+
+
+# ---------------------------------------------------------------------------
+# play_moves implementation
+# ---------------------------------------------------------------------------
+
+# Centipawn → eval label (white perspective) — mirrors generate_lines.py
+_CP_BANDS = [
+    (300, "winning for white"),
+    (101, "good for white"),
+    (-100, "equal"),
+    (-300, "good for black"),
+]
+
+
+def _cp_to_label(cp: int | None, mate_in: int | None) -> str:
+    if mate_in is not None:
+        return "winning for white" if mate_in > 0 else "winning for black"
+    if cp is None:
+        return "equal"
+    for threshold, label in _CP_BANDS:
+        if cp >= threshold:
+            return label
+    return "winning for black"
+
+
+def play_moves(fen: str, moves: list[str]) -> str:
+    """Apply a sequence of SAN or UCI moves to a position.
+
+    Returns JSON with the resulting FEN and the move list in SAN.
+    Returns an error if any move is illegal or unparseable.
+    """
+    try:
+        board = chess.Board(fen)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid FEN: {e}"})
+
+    san_moves: list[str] = []
+    for i, mv in enumerate(moves):
+        try:
+            # Try SAN first, then UCI
+            try:
+                move = board.parse_san(mv)
+            except Exception:
+                move = chess.Move.from_uci(mv)
+                if move not in board.legal_moves:
+                    raise ValueError(f"Illegal move: {mv}")
+            san_moves.append(board.san(move))
+            board.push(move)
+        except Exception as e:
+            return json.dumps(
+                {
+                    "error": f"Move {i + 1} ('{mv}') is illegal: {e}",
+                    "moves_applied": san_moves,
+                    "fen_after_applied": board.fen(),
+                }
+            )
+
+    return json.dumps(
+        {
+            "resulting_fen": board.fen(),
+            "moves_san": san_moves,
+            "is_check": board.is_check(),
+            "is_checkmate": board.is_checkmate(),
+            "is_stalemate": board.is_stalemate(),
+            "is_game_over": board.is_game_over(),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# get_top_lines implementation
+# ---------------------------------------------------------------------------
+
+
+async def get_top_lines(
+    fen: str,
+    stockfish: "Stockfish",  # type: ignore[name-defined]  # noqa: F821
+    n: int = 5,
+    depth: int = 15,
+) -> str:
+    """Return Stockfish's top N lines from a position as JSON.
+
+    Each line contains the move sequence in SAN and an eval label.
+    Raw centipawn numbers are never returned — only human-readable labels.
+    """
+    try:
+        board = chess.Board(fen)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid FEN: {e}"})
+
+    n = max(1, min(n, 5))
+    try:
+        analysis = await stockfish.analyze(fen, depth=depth, multipv=n)
+    except Exception as e:
+        return json.dumps({"error": f"Stockfish error: {e}"})
+
+    lines = []
+    for i, line in enumerate(analysis.lines[:n], 1):
+        if not line.pv:
+            continue
+        line_board = board.copy()
+        san_moves: list[str] = []
+        for uci in line.pv:
+            try:
+                mv = chess.Move.from_uci(uci)
+                san_moves.append(line_board.san(mv))
+                line_board.push(mv)
+            except Exception:
+                break
+        label = _cp_to_label(line.score.centipawns, line.score.mate_in)
+        lines.append(
+            {
+                "line": i,
+                "moves": san_moves,
+                "eval": label,
+                "depth": line.depth,
+            }
+        )
+
+    return json.dumps({"lines": lines, "fen": fen})
+
+
+# ---------------------------------------------------------------------------
+# get_attacks implementation
+# ---------------------------------------------------------------------------
+
+
+def get_attacks(fen: str, square: str) -> str:
+    """Return attack relationships for a given square.
+
+    Returns:
+      - piece_on_square: piece occupying the square (if any)
+      - attacked_by: pieces of both colours that attack this square
+      - attacks_to: squares this piece attacks (if a piece is present)
+    """
+    try:
+        board = chess.Board(fen)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid FEN: {e}"})
+
+    try:
+        sq = chess.parse_square(square)
+    except ValueError:
+        return json.dumps({"error": f"Invalid square: {square}"})
+
+    piece = board.piece_at(sq)
+    piece_str = piece.symbol() if piece else None
+
+    # Which pieces attack this square?
+    attacked_by: list[dict] = []
+    for color in (chess.WHITE, chess.BLACK):
+        for attacker_sq in board.attackers(color, sq):
+            ap = board.piece_at(attacker_sq)
+            if ap:
+                attacked_by.append(
+                    {
+                        "square": chess.square_name(attacker_sq),
+                        "piece": ap.symbol(),
+                        "color": "white" if color == chess.WHITE else "black",
+                    }
+                )
+
+    # Which squares does the piece on this square attack?
+    attacks_to: list[str] = []
+    if piece is not None:
+        attacks_to = [chess.square_name(s) for s in board.attacks(sq)]
+
+    return json.dumps(
+        {
+            "square": square,
+            "piece_on_square": piece_str,
+            "attacked_by": attacked_by,
+            "attacks_to": attacks_to,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# fen_to_board / board_to_fen implementations
+# ---------------------------------------------------------------------------
+
+
+def fen_to_board(fen: str) -> str:
+    """Return an ASCII board diagram for a FEN position.
+
+    Rank 8 is at the top (Black's side); rank 1 at the bottom (White's side).
+    Upper-case = White pieces; lower-case = Black pieces.
+    """
+    try:
+        board = chess.Board(fen)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid FEN: {e}"})
+
+    lines = ["  a b c d e f g h"]
+    for rank in range(7, -1, -1):
+        row = f"{rank + 1} "
+        for file in range(8):
+            sq = chess.square(file, rank)
+            piece = board.piece_at(sq)
+            row += (piece.symbol() if piece else ".") + " "
+        lines.append(row.rstrip())
+    diagram = "\n".join(lines)
+
+    side = "White" if board.turn == chess.WHITE else "Black"
+    return json.dumps(
+        {
+            "board": diagram,
+            "fen": fen,
+            "side_to_move": side,
+        }
+    )
+
+
+def board_to_fen(
+    placement: str,
+    side_to_move: str = "w",
+    castling: str = "-",
+    en_passant: str = "-",
+) -> str:
+    """Assemble and validate a FEN string from its components.
+
+    Returns the canonical FEN (normalised by python-chess) or an error.
+    """
+    side = side_to_move.strip().lower()
+    if side not in ("w", "b"):
+        return json.dumps({"error": f"Invalid side_to_move: '{side_to_move}' — use 'w' or 'b'"})
+    fen = f"{placement} {side} {castling} {en_passant} 0 1"
+    try:
+        board = chess.Board(fen)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid FEN components: {e}", "attempted_fen": fen})
+    return json.dumps({"fen": board.fen()})
