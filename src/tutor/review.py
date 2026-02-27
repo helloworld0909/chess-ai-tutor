@@ -138,7 +138,7 @@ async def _fetch_and_serve(
 )
 @click.option(
     "--llm-url",
-    default="http://localhost:8101/v1",
+    default="http://localhost:8100/v1",
     show_default=True,
     envvar="LLM_BASE_URL",
     help="OpenAI-compatible API base URL for LLM comments",
