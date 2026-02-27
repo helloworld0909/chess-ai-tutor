@@ -13,8 +13,8 @@ model:
   torch_dtype: bfloat16
 
 lora:
-  r: 32
-  alpha: 64
+  r: 64
+  alpha: 128
   dropout: 0.05
   target_modules:
     - q_proj
@@ -31,13 +31,16 @@ training:
   eval_file:  data/processed/lines_sft_eval.jsonl
 
   # Rollout generation
-  num_generations: 8          # completions sampled per prompt per step
+  # generation_batch_size = per_device_train_batch_size (1 process with device_map="auto").
+  # num_generations must divide generation_batch_size exactly.
+  # 4 completions × 1500 tokens at ~40 tok/s ≈ 2 min/batch — acceptable for RL
+  num_generations: 4          # completions sampled per prompt per step
   max_prompt_length: 600      # tokens (system + user only — measured p99=519)
-  max_completion_length: 7400 # tokens for <think> ~7k + <line> × 5 ~300 + headroom (8k total with prompt)
+  max_completion_length: 1500 # short thinking (~1000) + 3 lines (~400)
 
   # Batch
-  per_device_train_batch_size: 1   # 1 prompt × 8 generations = 8 rollouts/step
-  gradient_accumulation_steps: 4   # effective batch = 4 prompts × 8 gen = 32 rollouts
+  per_device_train_batch_size: 4   # generation_batch_size=4, divisible by num_generations=4 ✓
+  gradient_accumulation_steps: 2   # effective batch = 8 prompts × 4 gen = 32 rollouts
 
   # Optimiser
   learning_rate: 5.0e-6

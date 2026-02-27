@@ -103,6 +103,8 @@ def load_grpo_dataset(jsonl_path: str):
 
 
 def setup_model_and_tokenizer(config: dict):
+    import os
+
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
@@ -110,22 +112,52 @@ def setup_model_and_tokenizer(config: dict):
     lora_cfg = config["lora"]
     model_name = model_cfg["model_name"]
 
-    log.info("Loading tokenizer: %s", model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    # Detect whether model_name points to a PEFT adapter checkpoint
+    # (has adapter_config.json) or a full / base model directory.
+    adapter_config_path = os.path.join(model_name, "adapter_config.json")
+    is_peft_checkpoint = os.path.isfile(adapter_config_path)
+
+    if is_peft_checkpoint:
+        import json
+
+        with open(adapter_config_path) as f:
+            adapter_cfg = json.load(f)
+        base_model_name = adapter_cfg["base_model_name_or_path"]
+        log.info(
+            "Detected PEFT checkpoint — warm-start from Phase 2 adapter. Base: %s  Adapter: %s",
+            base_model_name,
+            model_name,
+        )
+    else:
+        base_model_name = model_name
+
+    log.info("Loading tokenizer: %s", base_model_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,  # tokenizer is saved in the adapter dir too
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # GRPOTrainer requires left-padding for generation
 
-    log.info("Loading model in 8-bit on cuda:0")
+    n_gpus = torch.cuda.device_count()
+    log.info("Loading base model in 8-bit across %d GPU(s)", n_gpus)
     bnb_config = BitsAndBytesConfig(load_in_8bit=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+    # device_map="auto" spreads across all visible GPUs to avoid OOM
+    device_map: dict | str = {"": 0} if n_gpus == 1 else "auto"
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
         quantization_config=bnb_config,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map={"": 0},  # single GPU
+        device_map=device_map,
         attn_implementation=model_cfg.get("attn_implementation", "sdpa"),
     )
+
+    # Always return the base model + LoraConfig so GRPOTrainer wraps it correctly.
+    # If warm-starting from a PEFT checkpoint, we store the adapter path for
+    # load_grpo_sft_weights() to call after GRPOTrainer has set up the adapter.
+    base_model._phase2_adapter_path = model_name if is_peft_checkpoint else None
 
     lora_config = LoraConfig(
         r=lora_cfg.get("r", 32),
@@ -139,7 +171,7 @@ def setup_model_and_tokenizer(config: dict):
         task_type="CAUSAL_LM",
     )
 
-    return model, tokenizer, lora_config
+    return base_model, tokenizer, lora_config
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +298,12 @@ def main():
         top_p=train_cfg.get("top_p", 0.95),
     )
 
+    # ── Compatibility shim: TRL 0.24 expects model.warnings_issued ───────
+    # transformers 5.2 doesn't have this attribute; add it so GRPOTrainer.__init__
+    # doesn't crash when it tries to suppress a spurious warning.
+    if not hasattr(model, "warnings_issued"):
+        model.warnings_issued = {}
+
     # ── Trainer ───────────────────────────────────────────────────────────
     trainer = GRPOTrainer(
         model=model,
@@ -276,6 +314,31 @@ def main():
         processing_class=tokenizer,
         peft_config=lora_config,
     )
+
+    # ── Warm-start: load Phase 2 SFT adapter weights ──────────────────────
+    # GRPOTrainer created a fresh LoRA adapter above. Now load Phase 2 weights
+    # into it so GRPO fine-tunes from the SFT checkpoint, not random init.
+    phase2_path = getattr(model, "_phase2_adapter_path", None)
+    if phase2_path:
+        from safetensors.torch import load_file
+
+        adapter_weights = load_file(f"{phase2_path}/adapter_model.safetensors")
+        peft_model = trainer.model
+        state = peft_model.state_dict()
+        # PEFT saves without adapter name: "...lora_A.weight"
+        # GRPOTrainer state dict uses adapter name "default": "...lora_A.default.weight"
+        # Remap by inserting ".default" before the final ".weight"
+        matched = 0
+        for k, v in adapter_weights.items():
+            remapped = k.replace(".lora_A.weight", ".lora_A.default.weight").replace(
+                ".lora_B.weight", ".lora_B.default.weight"
+            )
+            target_key = remapped if remapped in state else k
+            if target_key in state:
+                state[target_key] = v.to(state[target_key].device, dtype=state[target_key].dtype)
+                matched += 1
+        peft_model.load_state_dict(state, strict=False)
+        log.info("Warm-started GRPO adapter from Phase 2 checkpoint (%d tensors loaded)", matched)
 
     log.info("Starting GRPO training...")
     trainer.train(resume_from_checkpoint=args.resume)
