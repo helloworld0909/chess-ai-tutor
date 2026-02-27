@@ -63,8 +63,9 @@ ELO_TIERS = {
 # Target fraction per tier
 TIER_FRACTIONS = {"amateur": 0.50, "intermediate": 0.35, "strong": 0.15}
 
-# Skip early opening moves — too theory-dependent
-MIN_MOVE_NUMBER = 8
+# Skip the first N full moves (each full move = 2 ply: one white, one black)
+# 2 → skip only the first 2 full moves (4 ply), sample from move 3 onward
+MIN_MOVE_NUMBER = 2
 
 # Max ply per game to sample from (avoid dead endgames)
 MAX_PLY = 80

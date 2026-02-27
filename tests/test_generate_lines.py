@@ -102,8 +102,8 @@ class TestExtractPositions:
         return rng
 
     def test_short_game_returns_none(self):
-        # Only 6 moves (12 plies) — below MIN_MOVE_NUMBER * 2 = 16
-        transcript = "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6"
+        # Only 2 moves (4 plies) — at or below MIN_MOVE_NUMBER * 2 = 4
+        transcript = "e2e4 e7e5"
         import random
 
         result = _extract_positions_from_transcript(
