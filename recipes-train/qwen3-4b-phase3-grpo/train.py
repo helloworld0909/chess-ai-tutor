@@ -246,15 +246,14 @@ def main():
     log.info("Stockfish reward depth: %d", sf_depth)
 
     def reward_legality_gate(prompts: list, completions: list, **kwargs) -> list[float]:
-        """R1 hard gate: -1.0 per sample with any illegal line, +1.0 otherwise.
+        """R1 smooth legality: passes through the raw score from reward_legality.
 
-        When this fires -1.0, downstream rewards are expected to be near 0
-        (the model gets no learning signal from bad completions).
-        GRPOTrainer sums all reward_fns per sample — a -1.0 gate dominates.
+        reward_legality now returns a continuous value in [-1.0, +1.0] based on
+        the fraction of legal moves across all lines. This gives the model a
+        gradient to push more moves through legality rather than a hard cliff.
+        +1.0 = all lines fully legal; -1.0 = zero legal moves anywhere.
         """
-        scores = reward_legality(prompts, completions, **kwargs)
-        # Map: score < 0 (any illegal) → hard -1.0;  score >= 0 → +0.0 (gate passes, no bonus)
-        return [-1.0 if s < 0 else 0.0 for s in scores]
+        return reward_legality(prompts, completions, **kwargs)
 
     # ── Output logger: writes all completions + per-reward breakdown each batch ──
     # Log file rotates every logging_steps batches to avoid unbounded growth.

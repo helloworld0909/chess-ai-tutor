@@ -243,14 +243,44 @@ def _play_line(fen: str, moves_san: list[str]) -> tuple[bool, chess.Board]:
     return True, board
 
 
+def _legality_score(fen: str, moves_san: list[str]) -> float:
+    """Smooth per-line legality score in [-1.0, +1.0].
+
+    +1.0  — all moves legal
+    (-1, +1) — partial credit: 2*(legal_moves/total_moves) - 1
+    -1.0  — first move already illegal (zero legal moves)
+
+    This gives a continuous gradient signal: the model is rewarded
+    proportionally for each additional legal move it produces.
+    """
+    if not moves_san:
+        return -1.0
+    try:
+        board = chess.Board(fen)
+    except Exception:
+        return -1.0
+    legal_count = 0
+    for san in moves_san:
+        try:
+            board.push(board.parse_san(san))
+            legal_count += 1
+        except Exception:
+            break
+    # Map [0, total] → [-1.0, +1.0]
+    return 2.0 * (legal_count / len(moves_san)) - 1.0
+
+
 def reward_legality(
     prompts: list[list[dict] | str],
     completions: list[list[dict] | str],
     **kwargs: Any,
 ) -> list[float]:
-    """R1: +1.0 per fully-legal line, -1.0 per line with an illegal move.
+    """R1: smooth legality score in [-1.0, +1.0], mean over all parsed lines.
 
-    Score is the mean over all parsed lines (or -1.0 if no lines found).
+    +1.0 = every move in every line is legal.
+    -1.0 = no legal moves at all (or no lines parsed).
+    Partial credit for lines where the first N moves are legal before hitting
+    an illegal one — gives the model a gradient to push more moves through.
     """
     scores: list[float] = []
     for prompt, completion in zip(prompts, completions):
@@ -266,10 +296,7 @@ def reward_legality(
             scores.append(-1.0)
             continue
 
-        line_scores: list[float] = []
-        for line in lines:
-            legal, _ = _play_line(fen, line["moves_san"])
-            line_scores.append(1.0 if legal else -1.0)
+        line_scores = [_legality_score(fen, line["moves_san"]) for line in lines]
         scores.append(sum(line_scores) / len(line_scores))
     return scores
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -120,19 +121,33 @@ class TestRewardLegality:
     def test_fully_legal_completion(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_legality([prompt], [_completion(LEGAL_COMPLETION)])
-        assert scores[0] > 0
+        # All 3 moves in each line legal → score = 1.0
+        assert scores[0] == 1.0
 
     def test_illegal_completion_negative(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_legality([prompt], [_completion(ILLEGAL_COMPLETION)])
-        # Both lines illegal → mean = -1.0
+        # Both lines: first move illegal (0/2 legal) → line score = -1.0 → mean = -1.0
         assert scores[0] == -1.0
 
     def test_mixed_completion_zero(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_legality([prompt], [_completion(MIXED_COMPLETION)])
-        # One legal (+1), one illegal (-1) → mean = 0.0
+        # LINE 1: e5 illegal (0/2 legal) → -1.0
+        # LINE 2: d4, d5 both legal (2/2) → +1.0
+        # mean = 0.0
         assert scores[0] == 0.0
+
+    def test_partial_credit(self):
+        # A line where first move is legal but second is not: 1/2 legal → score = 0.0
+        partial = (
+            "<line>LINE 1: e4 (center) → e4 (illegal repeat) → Nf3 (develop) | eval: equal</line>\n"
+        )
+        prompt = _make_prompt(STARTING_FEN)
+        scores = reward_legality([prompt], [_completion(partial)])
+        # 1 legal out of 3 moves → 2*(1/3) - 1 = -0.333...
+        assert scores[0] < 0.0
+        assert scores[0] > -1.0
 
     def test_no_lines_scores_minus_one(self):
         prompt = _make_prompt(STARTING_FEN)
@@ -256,20 +271,23 @@ class TestRewardRelevance:
 
 class TestCombinedReward:
     def test_illegal_completion_dominated_by_gate(self):
-        # All lines illegal → combined should be -1.0 (hard gate)
+        # All lines illegal → combined should be -1.0 (hard gate).
+        # Patch _eval_fen so Stockfish is never spawned.
         all_illegal = (
             "<line>LINE 1: e5 (illegal) → Nf6 (develop) | eval: equal</line>\n"
             "<line>LINE 2: d5 (illegal) → d4 (control) | eval: equal</line>\n"
         )
         prompt = _make_prompt(STARTING_FEN)
-        scores = combined_reward([prompt], [_completion(all_illegal)])
+        with patch("verification.rewards._eval_fen", return_value=0):
+            scores = combined_reward([prompt], [_completion(all_illegal)])
         assert scores[0] == -1.0
 
     def test_legal_completion_positive(self):
         prompt = _make_prompt(STARTING_FEN)
-        # Without Stockfish, R2 (eval accuracy) will return 0.0 (neutral).
-        # Combined should still be >= 0 because legality gate passes.
-        scores = combined_reward([prompt], [_completion(LEGAL_COMPLETION)])
+        # Stockfish returns 0 cp (equal) — R2 exact match → 1.0
+        # Combined should be positive.
+        with patch("verification.rewards._eval_fen", return_value=0):
+            scores = combined_reward([prompt], [_completion(LEGAL_COMPLETION)])
         assert scores[0] >= 0.0
 
     def test_batch_size_matches(self):
@@ -279,5 +297,6 @@ class TestCombinedReward:
             _completion(ILLEGAL_COMPLETION),
             _completion(LEGAL_COMPLETION),
         ]
-        scores = combined_reward(prompts, completions)
+        with patch("verification.rewards._eval_fen", return_value=0):
+            scores = combined_reward(prompts, completions)
         assert len(scores) == 3
