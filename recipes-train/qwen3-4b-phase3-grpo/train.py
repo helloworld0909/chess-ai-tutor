@@ -280,13 +280,16 @@ def main():
 
             all_scores: list of length num_funcs, each a list of length num_completions.
             """
+            import datetime
+
             totals = [
                 sum(all_scores[r][i] for r in range(self.num_funcs))
                 for i in range(len(completions))
             ]
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(self.log_path, "a") as f:
                 f.write(f"\n{'=' * 80}\n")
-                f.write(f"STEP {step}  ({len(completions)} completions)\n")
+                f.write(f"STEP {step}  ({len(completions)} completions)  {ts}\n")
                 f.write(f"{'=' * 80}\n")
                 for i, (comp, total) in enumerate(zip(completions, totals)):
                     comp_text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
