@@ -256,59 +256,84 @@ def main():
         # Map: score < 0 (any illegal) → hard -1.0;  score >= 0 → +0.0 (gate passes, no bonus)
         return [-1.0 if s < 0 else 0.0 for s in scores]
 
-    # ── Output logger: writes best completion per batch to disk ───────────
-    # Lets us monitor what the model is actually generating without wandb.
-    class _RewardLogger:
-        """Accumulates per-reward scores and logs the best completion each batch."""
+    # ── Output logger: writes all completions + per-reward breakdown each batch ──
+    # Log file rotates every logging_steps batches to avoid unbounded growth.
+    _reward_names = [
+        "R0_format",
+        "R1_legality",
+        "R2_eval",
+        "R3a_annot",
+        "R4_depth",
+        "R5_breadth",
+        "R6_relevance",
+    ]
 
-        def __init__(self, num_funcs: int, log_path: str = "best_completion.log"):
+    class _RewardLogger:
+        """Accumulates individual reward scores and logs every completion each batch."""
+
+        def __init__(self, num_funcs: int, log_path: str = "completions.log"):
             self.num_funcs = num_funcs
             self.log_path = log_path
             self.batch_state: dict = {}
+            self.step = 0
 
-        def wrap(self, fn):
+        def wrap(self, fn, reward_idx: int):
             num_funcs = self.num_funcs
-            log_path = self.log_path
             batch_state = self.batch_state
+            logger = self
 
             def _wrapped(prompts, completions, **kwargs):
                 cid = id(completions)
                 if cid not in batch_state:
-                    batch_state[cid] = {"scores": [0.0] * len(completions), "calls": 0}
+                    batch_state[cid] = {
+                        "completions": completions,
+                        "per_reward": [[0.0] * len(completions) for _ in range(num_funcs)],
+                        "calls": 0,
+                    }
                 scores = fn(prompts, completions, **kwargs)
-                for i, s in enumerate(scores):
-                    batch_state[cid]["scores"][i] += s
+                batch_state[cid]["per_reward"][reward_idx] = scores
                 batch_state[cid]["calls"] += 1
+
                 if batch_state[cid]["calls"] == num_funcs:
-                    sums = batch_state[cid]["scores"]
-                    best = max(range(len(sums)), key=lambda i: sums[i])
-                    comp = completions[best]
-                    comp_text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
-                    prmp = prompts[best]
-                    prmp_text = (
-                        "\n".join(m.get("content", "") for m in prmp)
-                        if isinstance(prmp, list)
-                        else str(prmp)
-                    )
-                    with open(log_path, "a") as f:
-                        f.write(f"--- BEST (score={sums[best]:.3f}) ---\n")
-                        f.write(f"PROMPT:\n{prmp_text}\n\nCOMPLETION:\n{comp_text}\n\n")
-                    del batch_state[cid]
+                    state = batch_state.pop(cid)
+                    logger.step += 1
+                    logger._write(logger.step, state)
+
                 return scores
 
             _wrapped.__name__ = fn.__name__
             return _wrapped
 
+        def _write(self, step: int, state: dict) -> None:
+            completions = state["completions"]
+            per_reward = state["per_reward"]  # [num_funcs][num_completions]
+            totals = [
+                sum(per_reward[r][i] for r in range(self.num_funcs))
+                for i in range(len(completions))
+            ]
+
+            with open(self.log_path, "a") as f:
+                f.write(f"\n{'=' * 80}\n")
+                f.write(f"STEP {step}  ({len(completions)} completions)\n")
+                f.write(f"{'=' * 80}\n")
+                for i, (comp, total) in enumerate(zip(completions, totals)):
+                    comp_text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
+                    reward_parts = "  ".join(
+                        f"{_reward_names[r]}={per_reward[r][i]:+.3f}" for r in range(self.num_funcs)
+                    )
+                    f.write(f"\n[{i}] total={total:+.3f}  {reward_parts}\n")
+                    f.write(f"{comp_text}\n")
+
     _logger = _RewardLogger(num_funcs=7)
 
     reward_fns = [
-        _logger.wrap(_make_weighted_reward(reward_format, 0.20)),  # R0: format cold-start
-        _logger.wrap(reward_legality_gate),  # R1: legality gate
-        _logger.wrap(_make_weighted_reward(reward_eval_accuracy, 0.28)),  # R2
-        _logger.wrap(_make_weighted_reward(reward_annotation_structural, 0.12)),  # R3a
-        _logger.wrap(_make_weighted_reward(reward_depth, 0.10)),  # R4
-        _logger.wrap(_make_weighted_reward(reward_breadth, 0.10)),  # R5
-        _logger.wrap(_make_weighted_reward(reward_relevance, 0.05)),  # R6
+        _logger.wrap(_make_weighted_reward(reward_format, 0.20), 0),  # R0
+        _logger.wrap(reward_legality_gate, 1),  # R1
+        _logger.wrap(_make_weighted_reward(reward_eval_accuracy, 0.28), 2),  # R2
+        _logger.wrap(_make_weighted_reward(reward_annotation_structural, 0.12), 3),  # R3a
+        _logger.wrap(_make_weighted_reward(reward_depth, 0.10), 4),  # R4
+        _logger.wrap(_make_weighted_reward(reward_breadth, 0.10), 5),  # R5
+        _logger.wrap(_make_weighted_reward(reward_relevance, 0.05), 6),  # R6
     ]
 
     # ── GRPOConfig ────────────────────────────────────────────────────────
