@@ -56,10 +56,10 @@ training:
   max_grad_norm: 0.1
 
   # GRPO hyperparameters
-  # beta=0.001: near-zero KL penalty. The Phase 2 SFT reference is weak (illegal moves),
-  # so we don't want to be pulled back toward it. Near-zero prevents numerical instability
-  # while letting the policy diverge freely toward legal/correct outputs.
-  beta: 0.001     # near-zero KL — reference model is bad, don't punish divergence
+  # beta=0: TRL skips the reference model entirely (ref_model=None), saving ~5GB VRAM
+  # per GPU and one full forward pass per step. The Phase 2 SFT reference is weak
+  # (produces illegal moves), so there is no benefit to KL regularization here.
+  beta: 0.0       # no KL penalty — ref model skipped entirely, saves VRAM + compute
   epsilon: 0.2    # PPO clip ratio
 
   # Generation sampling
