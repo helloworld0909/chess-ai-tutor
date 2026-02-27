@@ -153,14 +153,14 @@ class TestRewardDepth:
     def test_three_move_lines_below_target(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_depth([prompt], [_completion(LEGAL_COMPLETION)])
-        # Each line has 3 moves; target is 6 → score = 3/6 = 0.5
-        assert abs(scores[0] - 0.5) < 0.01
+        # Each line has 3 moves; target is 2 → score = min(3,2)/2 = 1.0
+        assert abs(scores[0] - 1.0) < 0.01
 
     def test_short_lines_low_score(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_depth([prompt], [_completion(SHORT_COMPLETION)])
-        # Each line has 1 move; target is 6 → score = 1/6 ≈ 0.167
-        assert scores[0] < 0.3
+        # Each line has 1 move; target is 2 → score = 1/2 = 0.5
+        assert abs(scores[0] - 0.5) < 0.01
 
     def test_no_lines_minus_one(self):
         prompt = _make_prompt(STARTING_FEN)

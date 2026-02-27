@@ -255,13 +255,58 @@ def main():
         # Map: score < 0 (any illegal) → hard -1.0;  score >= 0 → +0.0 (gate passes, no bonus)
         return [-1.0 if s < 0 else 0.0 for s in scores]
 
+    # ── Output logger: writes best completion per batch to disk ───────────
+    # Lets us monitor what the model is actually generating without wandb.
+    class _RewardLogger:
+        """Accumulates per-reward scores and logs the best completion each batch."""
+
+        def __init__(self, num_funcs: int, log_path: str = "best_completion.log"):
+            self.num_funcs = num_funcs
+            self.log_path = log_path
+            self.batch_state: dict = {}
+
+        def wrap(self, fn):
+            num_funcs = self.num_funcs
+            log_path = self.log_path
+            batch_state = self.batch_state
+
+            def _wrapped(prompts, completions, **kwargs):
+                cid = id(completions)
+                if cid not in batch_state:
+                    batch_state[cid] = {"scores": [0.0] * len(completions), "calls": 0}
+                scores = fn(prompts, completions, **kwargs)
+                for i, s in enumerate(scores):
+                    batch_state[cid]["scores"][i] += s
+                batch_state[cid]["calls"] += 1
+                if batch_state[cid]["calls"] == num_funcs:
+                    sums = batch_state[cid]["scores"]
+                    best = max(range(len(sums)), key=lambda i: sums[i])
+                    comp = completions[best]
+                    comp_text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
+                    prmp = prompts[best]
+                    prmp_text = (
+                        "\n".join(m.get("content", "") for m in prmp)
+                        if isinstance(prmp, list)
+                        else str(prmp)
+                    )
+                    with open(log_path, "a") as f:
+                        f.write(f"--- BEST (score={sums[best]:.3f}) ---\n")
+                        f.write(f"PROMPT:\n{prmp_text}\n\nCOMPLETION:\n{comp_text}\n\n")
+                    del batch_state[cid]
+                return scores
+
+            _wrapped.__name__ = fn.__name__
+            return _wrapped
+
+    _logger = _RewardLogger(num_funcs=6)
+
     reward_fns = [
-        reward_legality_gate,  # R1: -1.0 gate, not weighted (not a bonus)
-        _make_weighted_reward(reward_eval_accuracy, 0.28),  # R2
-        _make_weighted_reward(reward_annotation_structural, 0.12),  # R3a
-        _make_weighted_reward(reward_depth, 0.10),  # R4
-        _make_weighted_reward(reward_breadth, 0.10),  # R5
-        _make_weighted_reward(reward_relevance, 0.05),  # R6
+        _logger.wrap(reward_legality_gate),  # R1
+        _logger.wrap(_make_weighted_reward(reward_eval_accuracy, 0.28)),  # R2
+        _logger.wrap(_make_weighted_reward(reward_annotation_structural, 0.12)),  # R3a
+        _logger.wrap(_make_weighted_reward(reward_depth, 0.10)),  # R4
+        _logger.wrap(_make_weighted_reward(reward_breadth, 0.10)),  # R5
+        _logger.wrap(_make_weighted_reward(reward_relevance, 0.05)),  # R6
     ]
 
     # ── GRPOConfig ────────────────────────────────────────────────────────

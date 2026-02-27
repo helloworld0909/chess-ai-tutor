@@ -486,7 +486,8 @@ def reward_annotation_structural(
 # ---------------------------------------------------------------------------
 
 # Target half-moves per line — lines shorter than this score less
-_TARGET_DEPTH = 6
+# Start at 2 for curriculum: reward any line that has ≥2 legal moves
+_TARGET_DEPTH = 2
 
 
 def reward_depth(
