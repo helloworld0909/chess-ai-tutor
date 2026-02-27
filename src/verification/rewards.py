@@ -548,19 +548,32 @@ def reward_depth(
 ) -> list[float]:
     """R4: Reward lines proportional to their depth, capped at _TARGET_DEPTH.
 
-    Score per line = min(len(moves), _TARGET_DEPTH) / _TARGET_DEPTH.
-    Capped at 1.0 so padding beyond target gets no reward.
-    Final score = mean over all parsed lines (or -1.0 if none found).
+    Only legal lines (first move legal from FEN) count toward depth.
+    Score per legal line = min(len(moves), _TARGET_DEPTH) / _TARGET_DEPTH.
+    Final score = mean over legal lines, or -1.0 if no legal lines found.
     """
     scores: list[float] = []
     for prompt, completion in zip(prompts, completions):
+        prompt_text = _prompt_str(prompt)
+        fen, _ = _extract_context(prompt_text)
         completion_text = _prompt_str(completion)
         lines = parse_lines(completion_text)
         if not lines:
             scores.append(-1.0)
             continue
-        line_scores = [min(len(line["moves_san"]), _TARGET_DEPTH) / _TARGET_DEPTH for line in lines]
-        scores.append(sum(line_scores) / len(line_scores))
+        legal_line_scores = []
+        for line in lines:
+            if fen and line["moves_san"]:
+                try:
+                    board = chess.Board(fen)
+                    board.parse_san(line["moves_san"][0])
+                except Exception:
+                    continue  # first move illegal — skip this line
+            legal_line_scores.append(min(len(line["moves_san"]), _TARGET_DEPTH) / _TARGET_DEPTH)
+        if not legal_line_scores:
+            scores.append(-1.0)
+        else:
+            scores.append(sum(legal_line_scores) / len(legal_line_scores))
     return scores
 
 
@@ -574,11 +587,11 @@ def reward_breadth(
     completions: list[list[dict] | str],
     **kwargs: Any,
 ) -> list[float]:
-    """R5: Reward unique first moves across all parsed lines.
+    """R5: Reward unique first moves across legal lines only.
 
-    unique_ratio = len(set(first_moves)) / len(first_moves)
-    +1.0 if all lines start with a different move; lower if transpositions present.
-    Returns -1.0 if no lines found.
+    unique_ratio = len(set(legal_first_moves)) / len(legal_first_moves)
+    +1.0 if all legal lines start with a different move.
+    Returns -1.0 if no legal lines found.
     """
     scores: list[float] = []
     for prompt, completion in zip(prompts, completions):
@@ -589,11 +602,21 @@ def reward_breadth(
         if not lines:
             scores.append(-1.0)
             continue
-        first_moves = [line["moves_san"][0] for line in lines if line["moves_san"]]
-        if not first_moves:
+        legal_first_moves = []
+        for line in lines:
+            if not line["moves_san"]:
+                continue
+            if fen:
+                try:
+                    board = chess.Board(fen)
+                    board.parse_san(line["moves_san"][0])
+                except Exception:
+                    continue  # illegal first move — skip
+            legal_first_moves.append(line["moves_san"][0])
+        if not legal_first_moves:
             scores.append(-1.0)
             continue
-        unique_ratio = len(set(first_moves)) / len(first_moves)
+        unique_ratio = len(set(legal_first_moves)) / len(legal_first_moves)
         scores.append(unique_ratio)
     return scores
 

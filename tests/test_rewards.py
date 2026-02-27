@@ -197,12 +197,18 @@ class TestRewardDepth:
     def test_short_lines_low_score(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_depth([prompt], [_completion(SHORT_COMPLETION)])
-        # Each line has 1 move; target is 2 → score = 1/2 = 0.5
+        # Each line has 1 move; target is 2 → score = 1/2 = 0.5; both e4/d4 legal
         assert abs(scores[0] - 0.5) < 0.01
 
     def test_no_lines_minus_one(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_depth([prompt], [_completion(EMPTY_COMPLETION)])
+        assert scores[0] == -1.0
+
+    def test_illegal_lines_excluded(self):
+        # ILLEGAL_COMPLETION: both lines start with illegal moves → no legal lines → -1.0
+        prompt = _make_prompt(STARTING_FEN)
+        scores = reward_depth([prompt], [_completion(ILLEGAL_COMPLETION)])
         assert scores[0] == -1.0
 
     def test_long_line_capped_at_one(self):
@@ -226,14 +232,20 @@ class TestRewardBreadth:
     def test_all_different_first_moves_score_one(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_breadth([prompt], [_completion(LEGAL_COMPLETION)])
-        # e4, d4, Nf3 — all different
+        # e4, d4, Nf3 — all different legal moves
         assert scores[0] == 1.0
 
     def test_same_first_move_score_low(self):
         prompt = _make_prompt(STARTING_FEN)
         scores = reward_breadth([prompt], [_completion(SAME_FIRST_MOVE)])
-        # All three lines start with e4 → unique_ratio = 1/3
+        # All three lines start with e4 (legal) → unique_ratio = 1/3
         assert abs(scores[0] - 1 / 3) < 0.01
+
+    def test_illegal_lines_excluded(self):
+        # ILLEGAL_COMPLETION: e5, d5 both illegal from start → no legal lines → -1.0
+        prompt = _make_prompt(STARTING_FEN)
+        scores = reward_breadth([prompt], [_completion(ILLEGAL_COMPLETION)])
+        assert scores[0] == -1.0
 
     def test_no_lines_minus_one(self):
         prompt = _make_prompt(STARTING_FEN)

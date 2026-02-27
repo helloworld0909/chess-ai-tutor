@@ -268,49 +268,22 @@ def main():
     ]
 
     class _RewardLogger:
-        """Accumulates individual reward scores and logs every completion each batch."""
+        """Logs every completion with per-reward breakdown each batch."""
 
         def __init__(self, num_funcs: int, log_path: str = "completions.log"):
             self.num_funcs = num_funcs
             self.log_path = log_path
-            self.batch_state: dict = {}
             self.step = 0
 
-        def wrap(self, fn, reward_idx: int):
-            num_funcs = self.num_funcs
-            batch_state = self.batch_state
-            logger = self
+        def _write_parallel(self, step: int, completions: list, all_scores: list) -> None:
+            """Log all completions with per-reward breakdown.
 
-            def _wrapped(prompts, completions, **kwargs):
-                cid = id(completions)
-                if cid not in batch_state:
-                    batch_state[cid] = {
-                        "completions": completions,
-                        "per_reward": [[0.0] * len(completions) for _ in range(num_funcs)],
-                        "calls": 0,
-                    }
-                scores = fn(prompts, completions, **kwargs)
-                batch_state[cid]["per_reward"][reward_idx] = scores
-                batch_state[cid]["calls"] += 1
-
-                if batch_state[cid]["calls"] == num_funcs:
-                    state = batch_state.pop(cid)
-                    logger.step += 1
-                    logger._write(logger.step, state)
-
-                return scores
-
-            _wrapped.__name__ = fn.__name__
-            return _wrapped
-
-        def _write(self, step: int, state: dict) -> None:
-            completions = state["completions"]
-            per_reward = state["per_reward"]  # [num_funcs][num_completions]
+            all_scores: list of length num_funcs, each a list of length num_completions.
+            """
             totals = [
-                sum(per_reward[r][i] for r in range(self.num_funcs))
+                sum(all_scores[r][i] for r in range(self.num_funcs))
                 for i in range(len(completions))
             ]
-
             with open(self.log_path, "a") as f:
                 f.write(f"\n{'=' * 80}\n")
                 f.write(f"STEP {step}  ({len(completions)} completions)\n")
@@ -318,22 +291,49 @@ def main():
                 for i, (comp, total) in enumerate(zip(completions, totals)):
                     comp_text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
                     reward_parts = "  ".join(
-                        f"{_reward_names[r]}={per_reward[r][i]:+.3f}" for r in range(self.num_funcs)
+                        f"{_reward_names[r]}={all_scores[r][i]:+.3f}" for r in range(self.num_funcs)
                     )
                     f.write(f"\n[{i}] total={total:+.3f}  {reward_parts}\n")
                     f.write(f"{comp_text}\n")
 
     _logger = _RewardLogger(num_funcs=7)
 
-    reward_fns = [
-        _logger.wrap(_make_weighted_reward(reward_format, 0.20), 0),  # R0
-        _logger.wrap(reward_legality_gate, 1),  # R1
-        _logger.wrap(_make_weighted_reward(reward_eval_accuracy, 0.28), 2),  # R2
-        _logger.wrap(_make_weighted_reward(reward_annotation_structural, 0.12), 3),  # R3a
-        _logger.wrap(_make_weighted_reward(reward_depth, 0.10), 4),  # R4
-        _logger.wrap(_make_weighted_reward(reward_breadth, 0.10), 5),  # R5
-        _logger.wrap(_make_weighted_reward(reward_relevance, 0.05), 6),  # R6
+    # Individual weighted reward functions (for logging breakdown)
+    _reward_fns_individual = [
+        _make_weighted_reward(reward_format, 0.20),  # R0
+        reward_legality_gate,  # R1
+        _make_weighted_reward(reward_eval_accuracy, 0.28),  # R2
+        _make_weighted_reward(reward_annotation_structural, 0.12),  # R3a
+        _make_weighted_reward(reward_depth, 0.10),  # R4
+        _make_weighted_reward(reward_breadth, 0.10),  # R5
+        _make_weighted_reward(reward_relevance, 0.05),  # R6
     ]
+
+    # Run all 7 reward functions in parallel — TRL calls reward functions sequentially,
+    # so we expose a single function that fans out to a thread pool internally.
+    # This overlaps Stockfish evals (R2), annotation checks (R3a), and other CPU work,
+    # cutting reward wall-time from ~sum(fn_times) to ~max(fn_times).
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    _reward_executor = _TPE(max_workers=7, thread_name_prefix="reward")
+
+    def combined_parallel_reward(prompts, completions, **kwargs):
+        futures = [
+            _reward_executor.submit(fn, prompts, completions, **kwargs)
+            for fn in _reward_fns_individual
+        ]
+        all_scores = [f.result() for f in futures]  # [[s0..sN], [s0..sN], ...]
+
+        # Log breakdown and return sum across reward functions per completion
+        _logger._write_parallel(_logger.step + 1, completions, all_scores)
+        _logger.step += 1
+
+        n = len(completions)
+        return [sum(all_scores[r][i] for r in range(7)) for i in range(n)]
+
+    combined_parallel_reward.__name__ = "combined_reward"
+
+    reward_fns = [combined_parallel_reward]
 
     # ── GRPOConfig ────────────────────────────────────────────────────────
     from trl import GRPOConfig, GRPOTrainer
