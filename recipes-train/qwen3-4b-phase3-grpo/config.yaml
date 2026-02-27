@@ -36,11 +36,13 @@ training:
   # 8 completions × 1500 tokens at ~40 tok/s × 2 GPUs ≈ same wall-clock, 2× throughput
   num_generations: 4          # completions sampled per prompt per step
   max_prompt_length: 600      # tokens (system + user only — measured p99=519)
-  max_completion_length: 1500 # short thinking (~1000) + 3 lines (~400)
+  max_completion_length: 700  # observed mean=403, max=570 → 700 gives headroom, cuts padding 2×
+  stockfish_depth: 12         # depth 12 ≈ 4× faster than 18, sufficient for reward signal
 
-  # Batch
-  per_device_train_batch_size: 4   # per GPU; total generation_batch_size=8 (2 GPUs × 4)
-  gradient_accumulation_steps: 2   # effective batch = 8 prompts/GPU × 2 GPUs × 4 gen = 64 rollouts
+  # Batch — per_device_train_batch_size must be divisible by num_generations
+  # 4 prompts × 4 gen = 16 rollouts/GPU; 8 keeps OOM with GRPO log-prob storage overhead
+  per_device_train_batch_size: 4   # per GPU; must be divisible by num_generations=4 ✓
+  gradient_accumulation_steps: 2   # effective batch = 4 prompts/GPU × 2 GPUs × 4 gen × 2 accum = 64 rollouts
 
   # Optimiser
   learning_rate: 5.0e-6

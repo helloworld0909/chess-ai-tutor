@@ -132,7 +132,8 @@ def _prompt_str(prompt: list[dict] | str) -> str:
 _STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH", "stockfish")
 _ENGINE_POOL: list[Any] = []
 _ENGINE_LOCK = threading.Lock()
-_POOL_SIZE = 4  # concurrent Stockfish processes
+_POOL_SIZE = 16  # concurrent Stockfish processes (match max completions per step)
+_SF_DEPTH = 12  # eval depth for reward signal; can be overridden by trainer
 
 
 def _get_engine() -> Any:
@@ -261,7 +262,7 @@ def _r3_line_score(fen: str, line: dict) -> float:
         return -1.0  # illegal line — can't evaluate final position
 
     final_fen = board.fen()
-    cp = _eval_fen(final_fen, depth=18)
+    cp = _eval_fen(final_fen, depth=_SF_DEPTH)
     if cp is None:
         return 0.0  # Stockfish unavailable — neutral
 

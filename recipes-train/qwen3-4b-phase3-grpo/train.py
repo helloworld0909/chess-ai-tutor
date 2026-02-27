@@ -229,6 +229,7 @@ def main():
     # R1 (legality) is a hard gate: illegal completion → -1.0, all others 0.
     # Implemented by combined_reward; here we pass individual weighted fns to
     # GRPOTrainer so each reward is logged separately in wandb / stdout.
+    from verification import rewards as _rewards_mod
     from verification.rewards import (
         reward_annotation_structural,
         reward_breadth,
@@ -237,6 +238,11 @@ def main():
         reward_legality,
         reward_relevance,
     )
+
+    # Configure Stockfish eval depth from config (default 12 — fast enough for reward signal)
+    sf_depth = train_cfg.get("stockfish_depth", 12)
+    _rewards_mod._SF_DEPTH = sf_depth
+    log.info("Stockfish reward depth: %d", sf_depth)
 
     def reward_legality_gate(prompts: list, completions: list, **kwargs) -> list[float]:
         """R1 hard gate: -1.0 per sample with any illegal line, +1.0 otherwise.
@@ -289,6 +295,7 @@ def main():
         bf16=train_cfg.get("bf16", True),
         gradient_checkpointing=train_cfg.get("gradient_checkpointing", True),
         gradient_checkpointing_kwargs={"use_reentrant": False},
+        ddp_find_unused_parameters=False,
         seed=train_cfg.get("seed", 42),
         # GRPO-specific
         beta=train_cfg.get("beta", 0.04),  # KL penalty coefficient
