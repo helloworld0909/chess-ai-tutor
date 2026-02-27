@@ -1,9 +1,10 @@
 # Line-generator SFT — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=64)
 # Teaches the model the <line> output format before GRPO.
 # DDP: 2× RTX 5090  |  28k train / 1.4k eval
+# NOTE: starts from Phase 1 coach SFT checkpoint (sequential training)
 
 model:
-  model_name: "Qwen/Qwen3-4B-Thinking-2507"
+  model_name: "checkpoints/qwen3-4b-phase1-coach-sft/checkpoint-1230"
   quantization: "8bit"
   attn_implementation: "sdpa"
   torch_dtype: bfloat16
@@ -26,12 +27,12 @@ lora:
 training:
   train_file: data/processed/lines_sft.jsonl
   eval_file:  data/processed/lines_sft_eval.jsonl
-  max_seq_length: 1280   # covers p99=1054 with headroom
+  max_seq_length: 1280   # covers p99=1054 with headroom (think stripped from SFT targets)
   packing: false
 
-  per_device_train_batch_size: 5
+  per_device_train_batch_size: 7
   per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 8   # effective batch = 80 (same as coach SFT)
+  gradient_accumulation_steps: 6   # effective batch = 84 (~same as before)
 
   learning_rate: 1.0e-4
   lr_scheduler_type: cosine

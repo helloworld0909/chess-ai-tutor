@@ -54,22 +54,20 @@ Fields:
 
 **What is verifiable vs judged:**
 - Move sequence + eval label → verified by python-chess + Stockfish (free, deterministic)
-- Move purpose annotations → judged by GRPO reward R4 (Haiku, cheap)
+- Move purpose annotations → judged by GRPO reward R3 (Haiku, cheap)
 
 ### Verification with Stockfish (GRPO reward signals)
 
-**R1 — Move Legality (free, deterministic)**
+Rewards numbered by descending weight. R1 legality is evaluated first — an illegal line
+short-circuits all downstream rewards (R2–R6 cannot be computed without a legal line).
+
+**R1 — Move Legality (free, deterministic)** — hard gate, no weight
 Play each line with python-chess from the given FEN.
-- +1.0 per line if fully legal
-- -1.0 per line if any move is illegal (hard penalty — illegal moves are never acceptable)
+- Legal → proceed to R2–R7
+- Illegal → R = -1.0 immediately, skip all downstream rewards
 
-**R2 — Opponent Move Quality (free, Stockfish)**
-At each opponent move in a line, query Stockfish for the best move at depth 12.
-Penalise if opponent plays a move that loses >150cp vs Stockfish best.
-- -0.5 per opponent move that is a blunder (prevents "assume opponent blunders" lines)
-- 0.0 if opponent move is within 150cp of best (reasonable play)
-
-**R3 — Final Position Evaluation Accuracy (free, Stockfish)**
+**R2 — Final Position Evaluation Accuracy (free, Stockfish)** — weight 0.28
+*Requires R1 legal line.*
 Run Stockfish at depth 18 on the final position of each line.
 Map cp score to evaluation label:
 
@@ -85,9 +83,9 @@ Map cp score to evaluation label:
 - -0.5 if off by one band
 - -1.0 if completely wrong (e.g. "equal" when Stockfish says "winning")
 
-**R4 — Move Annotation Quality (split into two sub-rewards)**
+**R3 — Move Annotation Quality (split into two sub-rewards)** — weight 0.12
 
-*R4a — Structural Accuracy (free, deterministic — Phase 1)*
+*R3a — Structural Accuracy (free, deterministic — Phase 1)*
 `annotate_move()` in `data/pipeline/generate_lines.py` produces ground-truth structural
 annotations from python-chess (piece type, capture target, castling, promotion, check).
 For each move in the line, check the model's annotation against this ground truth:
@@ -126,34 +124,70 @@ def score_annotation_structural(board: chess.Board, move: chess.Move, annotation
     return 1.0
 ```
 
-*R4b — Enrichment Quality (Haiku judge — Phase 2)*
-Once R4a is validated, add a Haiku judge for the enrichment layer:
+*R3b — Enrichment Quality (Haiku judge — Phase 2)*
+Once R3a is validated, add a Haiku judge for the enrichment layer:
 - Does the annotation explain *why*, not just *what*? ("develop knight" > "move knight")
 - Is it concise (≤6 words)?
 - Is it accurate chess terminology?
 
 Score: 0.0–1.0. Cost: ~$0.001/line. *Skip until Phase 2.*
 
-**R5 — Line Relevance (free, Stockfish)**
+**R4 — Line Depth (free, deterministic)** — weight 0.10
+Rewards lines that go deep enough to be instructive. Target: 6 half-moves.
+```python
+score = min(len(moves_in_line) / 6, 1.0)
+```
+Score per line, averaged across all 5 lines. Capped at 1.0 to prevent padding.
+
+**R5 — Line Breadth (free, python-chess)** — weight 0.10
+Penalises lines that are transpositions of each other (same first move).
+Forces the model to explore genuinely different ideas.
+```python
+first_moves = [line.moves[0] for line in lines]
+unique_ratio = len(set(first_moves)) / len(first_moves)
+# 1.0 if all 5 lines start with different moves; 0.6 if only 3 unique first moves
+```
+
+**R6 — Opponent Move Quality (free, Stockfish)** — weight 0.10
+At each opponent move in a line, query Stockfish for the best move at depth 12.
+Penalise if opponent plays a move that loses >150cp vs Stockfish best.
+- -0.5 per opponent move that is a blunder (prevents "assume opponent blunders" lines)
+- 0.0 if opponent move is within 150cp of best (reasonable play)
+
+**R7 — Line Relevance (free, deterministic)** — weight 0.05
 A line is relevant if it illustrates the consequence of the move played.
 Proxy: the first move of the line must be the move played (or the best response to it).
 Lines that ignore the played move and analyse a random position get 0.
 
 **Combined Stage 1 Reward:**
 
+R1 is evaluated first. If R1=0 (illegal), all downstream rewards (R2–R7) are set to 0.
+
 Phase 1 (all free, no LLM cost):
 ```python
-R = 0.25 * R1 + 0.20 * R2 + 0.30 * R3 + 0.15 * R4a + 0.10 * R5
+if not R1_legal:
+    R = -1.0  # hard gate — skip all downstream
+else:
+    R = 0.28 * R2 + 0.12 * R3a + 0.10 * R4 + 0.10 * R5 + 0.10 * R6 + 0.05 * R7
+    # weights sum to 0.75; remaining 0.25 is implicit in the gate structure
 ```
 
 Phase 2 (add Haiku enrichment judge):
 ```python
-R = 0.22 * R1 + 0.18 * R2 + 0.28 * R3 + 0.12 * R4a + 0.10 * R4b + 0.10 * R5
+if not R1_legal:
+    R = -1.0
+else:
+    R = 0.28 * R2 + 0.10 * R3a + 0.08 * R3b + 0.11 * R4 + 0.11 * R5 + 0.08 * R6 + 0.05 * R7
 ```
 
-Legality (R1) is a hard gate — if 0, the line is useless regardless of other scores.
-Eval accuracy (R3) is highest weight — it's the most informative correctness signal.
-R4a catches factual annotation errors for free; R4b rewards richer explanations later.
+Weight rationale (sorted by weight):
+- R1 (legality)            = hard gate — no weight; illegal → -1.0, stop
+- R2 (eval accuracy)       = 0.28 — strongest verifiable signal
+- R3a (structural annotation) = 0.12 — free correctness check on move descriptions
+- R4 (depth)               = 0.10 — encourages ≥6 half-move lines
+- R5 (breadth)             = 0.10 — encourages genuinely different first moves
+- R6 (opponent quality)    = 0.10 — defensive floor; prevents "assume blunder" shortcuts
+- R7 (relevance)           = 0.05 — soft nudge to stay on-topic
 
 ### Bootstrapping the `<think>` Block
 
@@ -237,28 +271,34 @@ If Stage 2 GRPO is needed:
 
 ## Implementation Order
 
-### Phase 1 — Stage 1 Data + SFT (prerequisite for GRPO)
-- [x] `data/pipeline/generate_lines.py` — pull Lichess games from `austindavis/lichess_uci`,
-  sample by ELO tier, extract (FEN, move) at non-opening positions, run Stockfish `multipv 3`,
-  map cp → eval label (no cp in output), annotate moves with `annotate_move()`, emit JSONL
-- [ ] Add line generator system prompt to `src/tutor/prompts.py`
-- [ ] `recipes-train/qwen3-4b-lines/` — SFT recipe for line generator task
-  (reuses `training/lib.py`, new `train.py` with same 8-bit DDP setup)
+### Phase 1 — Coach SFT ✅ DONE
+- [x] `data/pipeline/generate_lines.py` — pull Lichess games, extract positions, run Stockfish
+- [x] Coach SFT: `recipes-train/qwen3-4b-phase1-coach-sft/` → `checkpoints/qwen3-4b-phase1-coach-sft/`
 
-### Phase 2 — Stage 1 GRPO
-- [ ] `src/verification/rewards.py` — R1 legality, R2 opponent quality, R3 eval accuracy,
-  R4a structural annotation check (`score_annotation_structural` using `annotate_move()`), R5 relevance
-- [ ] `training/lib_rl.py` — GRPO loop: rollout generation, reward aggregation, policy update
-- [ ] `recipes-train/qwen3-4b-grpo/` — GRPO recipe wrapping lib_rl
+### Phase 2 — Line Generator SFT (in progress)
+- [x] Training data: `data/processed/lines_sft.jsonl` (28k), `lines_sft_eval.jsonl` (1.5k)
+- [x] Recipe: `recipes-train/qwen3-4b-phase2-lines-sft/` — starts from Phase 1 checkpoint-1230
+- [ ] Wait for training to complete → `checkpoints/qwen3-4b-phase2-lines-sft/`
 
-### Phase 3 — Integration
-- [ ] Update `src/tutor/prompts.py` — pipe Stage 1 output into Stage 2 prompt
+### Phase 3 — GRPO on Line Generator (next)
+Improve line quality with verifiable Stockfish rewards. Starts from Phase 2 checkpoint.
+GRPO generates rollouts on the fly — no new SFT data needed. Uses existing
+`data/processed/lines_sft.jsonl` prompts (FEN + move) as the prompt pool.
+- [ ] `src/verification/rewards.py` — R1 legality (gate), R2 eval accuracy, R3a annotation,
+  R4 depth, R5 breadth, R6 opponent quality, R7 relevance
+  R1=hard gate (-1.0 if illegal, skip rest), R2=0.28, R3a=0.12, R4=0.10, R5=0.10, R6=0.10, R7=0.05
+- [ ] `recipes-train/qwen3-4b-phase3-grpo/` — already has config skeleton, wire up rewards
+- [ ] Start from Phase 2 final checkpoint (update `config.yaml` when Phase 2 completes)
+
+### ❌ No combined Phase 3 SFT
+**Decision**: skip the "lines + comment in one output" combined SFT stage.
+- Two-call serving (lines call → comment call) is fine for now
+- Single model, two system prompts — no extra training needed
+- Keeps line quality and comment quality independently improvable
+
+### Phase 4 — Integration into serving (after GRPO)
 - [ ] Update `src/tutor/web.py` / `src/tutor/review.py` — two-stage inference call
-- [ ] Eval: compare single-stage SFT vs two-stage (SFT lines + SFT coach) on 50 real games
-
-### Phase 4 — Stage 2 GRPO + R4b (optional, only if needed)
-- [ ] `src/tutor/judge.py` — async Haiku judge for R4b enrichment quality + Stage 2 coach reward
-- [ ] GRPO run on coach model with Haiku reward
+- [ ] Pipe line generator output into coach prompt as verified context
 
 ---
 
@@ -270,3 +310,10 @@ If Stage 2 GRPO is needed:
 - **GRPO library**: TRL's `GRPOTrainer` vs custom loop. TRL is simpler; custom loop
   needed if async Stockfish queries between steps are required.
 - **When to stop GRPO**: track R3 (eval accuracy) on held-out set; stop when it plateaus.
+
+## ✅ Phase 2 Base Model — RESOLVED
+
+**Decision**: Sequential training. Phase 2 now starts from Phase 1 checkpoint.
+`recipes-train/qwen3-4b-phase2-lines-sft/config.yaml` updated to
+`model_name: "checkpoints/qwen3-4b-phase1-coach-sft"`.
+Old Phase 2 checkpoint (trained from base) deleted.

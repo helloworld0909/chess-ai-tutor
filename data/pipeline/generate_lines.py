@@ -1,6 +1,6 @@
 """Generate Stockfish key-line data from Lichess games for Stage 1 SFT/GRPO.
 
-For each sampled (FEN, move) position, runs Stockfish multipv=3 to get key lines,
+For each sampled (FEN, move) position, runs Stockfish multipv=5 to get key lines,
 maps centipawn scores to eval labels (no raw numbers in output), and emits JSONL.
 
 Output format per record:
@@ -65,7 +65,10 @@ MAX_PLY = 80
 
 # Stockfish settings
 ANALYSIS_DEPTH = 15
-MULTIPV = 3
+MULTIPV = 5
+# Target minimum line depth (half-moves) — lines shorter than this get padded
+# by continuing Stockfish analysis; used for R6 depth reward during GRPO.
+MIN_LINE_DEPTH = 6
 
 # Centipawn → eval label mapping (always from white's perspective)
 CP_BANDS = [

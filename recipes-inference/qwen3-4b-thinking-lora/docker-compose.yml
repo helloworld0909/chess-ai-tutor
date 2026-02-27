@@ -29,7 +29,7 @@ services:
       --tool-call-parser qwen3_coder
       --enable-lora
       --max-lora-rank 64
-      --lora-modules chess-tutor=/checkpoints/chess-tutor-4b-poc
+      --lora-modules chess-tutor=/checkpoints/qwen3-4b-phase2-lines-sft/checkpoint-350
     deploy:
       resources:
         reservations:

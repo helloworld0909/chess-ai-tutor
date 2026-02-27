@@ -10,10 +10,10 @@ set -e
 RECIPE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PROJECT_DIR="$(dirname "$(dirname "$RECIPE_DIR")")"
 
-ADAPTER_DIR="$PROJECT_DIR/checkpoints/chess-tutor-4b-poc"
+ADAPTER_DIR="$PROJECT_DIR/checkpoints/qwen3-4b-phase2-lines-sft/checkpoint-350"
 if [[ ! -d "$ADAPTER_DIR" ]]; then
     echo "Error: LoRA adapter not found at $ADAPTER_DIR"
-    echo "Run training first: ./scripts/start_train.sh --config training/configs/qwen3_4b.yaml --nproc 2"
+    echo "Expected Phase 2 line-generator SFT checkpoint at: $ADAPTER_DIR"
     exit 1
 fi
 
