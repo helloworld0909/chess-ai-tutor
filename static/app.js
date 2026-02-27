@@ -15,6 +15,9 @@ let flipped      = false;
 let analysisCache = {};    // "fen|uci|model" → analysis response
 let compareMode  = false;  // true = show fine-tuned + base side by side
 
+/** Active AbortControllers for in-flight SSE streams; cancelled on navigation. */
+let _activeStreams = [];
+
 // Model names (must match vLLM --lora-modules)
 const MODEL_LORA = 'chess-tutor';
 const MODEL_BASE = 'Qwen/Qwen3-4B-Thinking-2507';
@@ -95,6 +98,7 @@ async function loadGameList() {
 // ── Load game ─────────────────────────────────────────────────────────────────
 
 async function loadGame(gameId) {
+  abortActiveStreams();
   const res = await fetch(`/api/game/${gameId}`);
   currentGame   = await res.json();
   currentIndex  = -1;
@@ -291,79 +295,188 @@ function updateToggleLabels() {
 
 // ── Analysis ──────────────────────────────────────────────────────────────────
 
+/** Cancel any in-flight SSE streams (called when the user navigates to a new move). */
+function abortActiveStreams() {
+  _activeStreams.forEach(ctrl => { try { ctrl.abort(); } catch (_) {} });
+  _activeStreams = [];
+}
+
 async function fetchAnalysis(fen, moveUci) {
+  abortActiveStreams();
+
   if (compareMode) {
-    await fetchCompare(fen, moveUci);
+    fetchCompare(fen, moveUci);
     return;
   }
 
   const model = activeModel();
   const key = `${fen}|${moveUci}|${model}`;
-  showAnalysisLoading(document.getElementById('analysis-content'));
+  const el = document.getElementById('analysis-content');
 
-  if (analysisCache[key]) { renderAnalysis(analysisCache[key], document.getElementById('analysis-content')); return; }
-
-  try {
-    const res = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fen, move_uci: moveUci, model }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    analysisCache[key] = data;
-
-    // Only render if still the current move
-    const cur = currentIndex >= 0 ? currentGame.moves[currentIndex] : null;
-    if (cur && `${cur.fen_before}|${cur.uci}` === `${fen}|${moveUci}`) {
-      renderAnalysis(data, document.getElementById('analysis-content'));
-    }
-  } catch (err) {
-    showAnalysisError(err.message, document.getElementById('analysis-content'));
+  // Cache hit — render immediately
+  if (analysisCache[key]) {
+    renderAnalysis(analysisCache[key], el);
+    return;
   }
+
+  showAnalysisLoading(el);
+  streamAnalysis(fen, moveUci, model, key, el, null);
 }
 
 async function fetchCompare(fen, moveUci) {
   const elLora = document.getElementById('analysis-content');
   const elBase = document.getElementById('analysis-content-base');
-  showAnalysisLoading(elLora, 'Fine-tuned');
-  showAnalysisLoading(elBase, 'Base model');
 
   const keyLora = `${fen}|${moveUci}|${MODEL_LORA}`;
   const keyBase = `${fen}|${moveUci}|${MODEL_BASE}`;
 
-  const fetchOne = async (model, key) => {
-    if (analysisCache[key]) return analysisCache[key];
-    const res = await fetch('/api/analyze', {
+  if (analysisCache[keyLora]) {
+    renderAnalysis(analysisCache[keyLora], elLora, 'Fine-tuned');
+  } else {
+    showAnalysisLoading(elLora, 'Fine-tuned');
+    streamAnalysis(fen, moveUci, MODEL_LORA, keyLora, elLora, 'Fine-tuned');
+  }
+
+  if (analysisCache[keyBase]) {
+    renderAnalysis(analysisCache[keyBase], elBase, 'Base model');
+  } else {
+    showAnalysisLoading(elBase, 'Base model');
+    streamAnalysis(fen, moveUci, MODEL_BASE, keyBase, elBase, 'Base model');
+  }
+}
+
+/**
+ * Open an SSE stream to /api/analyze/stream and progressively render tokens.
+ * Populates analysisCache[cacheKey] on completion and does a final clean render.
+ */
+async function streamAnalysis(fen, moveUci, model, cacheKey, el, modelLabel) {
+  const ctrl = new AbortController();
+  _activeStreams.push(ctrl);
+
+  // Accumulated buffers
+  let metaData = null;
+  let commentText = '';
+  let thinkText = '';
+
+  try {
+    const res = await fetch('/api/analyze/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fen, move_uci: moveUci, model }),
+      signal: ctrl.signal,
     });
+
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    analysisCache[key] = data;
-    return data;
-  };
 
-  // Fire both in parallel
-  const [loraResult, baseResult] = await Promise.allSettled([
-    fetchOne(MODEL_LORA, keyLora),
-    fetchOne(MODEL_BASE, keyBase),
-  ]);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuffer = '';
 
-  const cur = currentIndex >= 0 ? currentGame.moves[currentIndex] : null;
-  if (!cur || `${cur.fen_before}|${cur.uci}` !== `${fen}|${moveUci}`) return;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-  if (loraResult.status === 'fulfilled') {
-    renderAnalysis(loraResult.value, elLora, 'Fine-tuned');
-  } else {
-    showAnalysisError(loraResult.reason?.message ?? 'error', elLora);
+      sseBuffer += decoder.decode(value, { stream: true });
+
+      // Parse complete SSE messages (terminated by \n\n)
+      let boundary;
+      while ((boundary = sseBuffer.indexOf('\n\n')) !== -1) {
+        const message = sseBuffer.slice(0, boundary);
+        sseBuffer = sseBuffer.slice(boundary + 2);
+
+        let eventType = 'message';
+        let dataStr = '';
+        for (const line of message.split('\n')) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          else if (line.startsWith('data: ')) dataStr = line.slice(6);
+        }
+        if (!dataStr) continue;
+
+        if (eventType === 'meta') {
+          metaData = JSON.parse(dataStr);
+          renderStreamHeader(metaData, el, modelLabel);
+
+        } else if (eventType === 'token') {
+          commentText += JSON.parse(dataStr);
+          updateStreamComment(commentText, el);
+
+        } else if (eventType === 'think') {
+          thinkText += JSON.parse(dataStr);
+          updateStreamThinking(thinkText, el);
+
+        } else if (eventType === 'done') {
+          // Populate cache and do a clean final render
+          if (metaData) {
+            const cached = {
+              ...metaData,
+              comment: commentText,
+              comment_source: 'llm',
+              thinking: thinkText,
+            };
+            analysisCache[cacheKey] = cached;
+            // Only do final render if this move is still active
+            const cur = currentIndex >= 0 ? currentGame?.moves[currentIndex] : null;
+            if (cur && `${cur.fen_before}|${cur.uci}` === `${fen}|${moveUci}`) {
+              renderAnalysis(cached, el, modelLabel);
+            }
+          }
+          return;
+
+        } else if (eventType === 'error') {
+          const errData = JSON.parse(dataStr);
+          showAnalysisError(errData.error ?? 'stream error', el);
+          return;
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      showAnalysisError(err.message, el);
+    }
+  } finally {
+    _activeStreams = _activeStreams.filter(c => c !== ctrl);
   }
-  if (baseResult.status === 'fulfilled') {
-    renderAnalysis(baseResult.value, elBase, 'Base model');
-  } else {
-    showAnalysisError(baseResult.reason?.message ?? 'error', elBase);
+}
+
+/** Render the classification/eval header row immediately when meta event arrives. */
+function renderStreamHeader(meta, el, modelLabel) {
+  const cls = meta.classification;
+  if (!modelLabel || modelLabel === 'Fine-tuned') {
+    const activeCell = document.querySelector('.move-cell.active');
+    if (activeCell) activeCell.dataset.class = cls;
   }
+  const modelBadge = modelLabel ? `<span class="model-badge">${modelLabel}</span>` : '';
+  el.innerHTML = `
+    <div class="analysis-row">
+      ${modelBadge}
+      <span class="class-pill class-${cls}">${cls}</span>
+      <span class="eval-pill">${meta.eval_before}</span>
+      <span class="source-badge source-llm">AI</span>
+    </div>
+    ${!meta.is_best
+      ? `<div class="best-move-row">Best: <strong>${meta.best_move}</strong>${meta.cp_loss > 0 ? ` (−${meta.cp_loss} cp)` : ''}</div>`
+      : ''}
+    <p class="comment-text streaming"></p>
+    <details class="thinking-block" hidden>
+      <summary>Thinking</summary>
+      <pre class="thinking-text"></pre>
+    </details>
+  `;
+}
+
+/** Append streamed comment text into the comment paragraph. */
+function updateStreamComment(text, el) {
+  const p = el.querySelector('.comment-text.streaming');
+  if (p) p.textContent = text;
+}
+
+/** Append streamed thinking text into the details block. */
+function updateStreamThinking(text, el) {
+  const details = el.querySelector('.thinking-block');
+  const pre = el.querySelector('.thinking-text');
+  if (!details || !pre) return;
+  details.hidden = false;
+  pre.textContent = text;
 }
 
 function renderAnalysis(data, el, modelLabel) {

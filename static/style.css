@@ -475,6 +475,20 @@ main {
   line-height: 1.5;
 }
 
+/* ── Streaming cursor ─────────────────────────────────────────── */
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+.comment-text.streaming::after {
+  content: '▍';
+  display: inline-block;
+  margin-left: 1px;
+  animation: blink-cursor 0.8s step-end infinite;
+  color: var(--text-muted);
+}
+
 /* ── Responsive ───────────────────────────────────────────────── */
 @media (max-width: 960px) {
   main { flex-direction: column; align-items: center; }
