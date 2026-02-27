@@ -272,6 +272,47 @@ def annotate_move(board: chess.Board, move: chess.Move) -> str:
     return f"move {piece_name}{suffix}"
 
 
+def score_annotation_structural(board: chess.Board, move: chess.Move, annotation: str) -> float:
+    """Score a model-generated annotation against ground-truth structural facts.
+
+    Checks three binary facts derivable from python-chess at zero cost:
+    - capture vs non-capture
+    - correct piece name mentioned
+    - check flag matches
+
+    Returns +1.0 if all facts are correct, -1.0 if any is wrong.
+    Used as R4a in the GRPO reward during training.
+    """
+    ann = annotation.lower()
+
+    is_capture = board.is_capture(move)
+    mentions_capture = "capture" in ann
+    if is_capture != mentions_capture:
+        return -1.0
+
+    if is_capture:
+        # For captures, annotation names the captured piece (not the mover)
+        captured = board.piece_at(move.to_square)
+        if captured is not None:
+            cap_name = _PIECE_NAMES.get(captured.piece_type, "piece")
+            if cap_name not in ann:
+                return -1.0
+    else:
+        # For non-captures, annotation names the moving piece
+        piece = board.piece_at(move.from_square)
+        if piece is not None:
+            piece_name = _PIECE_NAMES.get(piece.piece_type, "piece")
+            if piece_name not in ann:
+                return -1.0
+
+    gives_check = board.gives_check(move)
+    mentions_check = "check" in ann
+    if gives_check != mentions_check:
+        return -1.0
+
+    return 1.0
+
+
 # ---------------------------------------------------------------------------
 # Line generation
 # ---------------------------------------------------------------------------

@@ -85,14 +85,54 @@ Map cp score to evaluation label:
 - -0.5 if off by one band
 - -1.0 if completely wrong (e.g. "equal" when Stockfish says "winning")
 
-**R4 — Move Annotation Quality (optional, Phase 2, Haiku judge)**
-Each move has a purpose annotation in parentheses. Haiku judges a sample of annotations per line:
-- Are the annotations accurate chess concepts (not vague filler like "good move")?
-- Do they reflect the actual purpose of the move in context (tactics, strategy, development)?
-- Are they concise (3-6 words per annotation)?
+**R4 — Move Annotation Quality (split into two sub-rewards)**
 
-Score: 0.0–1.0 normalised from Haiku rubric. Cost: ~$0.001/line → negligible.
-*Skip in Phase 1 — implement after verifiable rewards (R1/R2/R3/R5) are validated.*
+*R4a — Structural Accuracy (free, deterministic — Phase 1)*
+`annotate_move()` in `data/pipeline/generate_lines.py` produces ground-truth structural
+annotations from python-chess (piece type, capture target, castling, promotion, check).
+For each move in the line, check the model's annotation against this ground truth:
+
+- Does it correctly identify capture vs non-capture?
+  - "capture X" in model annotation ↔ `board.is_capture(move)` in ground truth
+- Does it name the right piece being moved?
+  - Piece name (pawn/knight/bishop/rook/queen/king) present in model annotation
+- Does it include "check" iff the move gives check?
+  - `board.gives_check(move)` matches "check" in annotation
+- Does it correctly identify castling / promotion?
+
+Score per move: +1.0 if all facts correct, -1.0 if any structural fact wrong.
+Line score: mean over all moves in the line. Cost: zero — pure python-chess.
+
+```python
+def score_annotation_structural(board: chess.Board, move: chess.Move, annotation: str) -> float:
+    gt = annotate_move(board, move)  # ground truth
+    gt_tokens = set(gt.split())
+    ann_tokens = set(annotation.lower().split())
+    # Check structural keywords match
+    is_capture = board.is_capture(move)
+    mentions_capture = "capture" in ann_tokens
+    if is_capture != mentions_capture:
+        return -1.0
+    # Piece name must appear
+    piece = board.piece_at(move.from_square)
+    piece_name = _PIECE_NAMES.get(piece.piece_type, "piece") if piece else "piece"
+    if piece_name not in ann_tokens:
+        return -1.0
+    # Check flag must match
+    gives_check = board.gives_check(move)
+    mentions_check = "check" in ann_tokens
+    if gives_check != mentions_check:
+        return -1.0
+    return 1.0
+```
+
+*R4b — Enrichment Quality (Haiku judge — Phase 2)*
+Once R4a is validated, add a Haiku judge for the enrichment layer:
+- Does the annotation explain *why*, not just *what*? ("develop knight" > "move knight")
+- Is it concise (≤6 words)?
+- Is it accurate chess terminology?
+
+Score: 0.0–1.0. Cost: ~$0.001/line. *Skip until Phase 2.*
 
 **R5 — Line Relevance (free, Stockfish)**
 A line is relevant if it illustrates the consequence of the move played.
@@ -100,13 +140,20 @@ Proxy: the first move of the line must be the move played (or the best response 
 Lines that ignore the played move and analyse a random position get 0.
 
 **Combined Stage 1 Reward:**
+
+Phase 1 (all free, no LLM cost):
 ```python
-R = 0.25 * R1 + 0.20 * R2 + 0.30 * R3 + 0.15 * R4 + 0.10 * R5
+R = 0.25 * R1 + 0.20 * R2 + 0.30 * R3 + 0.15 * R4a + 0.10 * R5
+```
+
+Phase 2 (add Haiku enrichment judge):
+```python
+R = 0.22 * R1 + 0.18 * R2 + 0.28 * R3 + 0.12 * R4a + 0.10 * R4b + 0.10 * R5
 ```
 
 Legality (R1) is a hard gate — if 0, the line is useless regardless of other scores.
 Eval accuracy (R3) is highest weight — it's the most informative correctness signal.
-Move annotations (R4) are rewarded but not dominant — they enrich lines, not define them.
+R4a catches factual annotation errors for free; R4b rewards richer explanations later.
 
 ### Bootstrapping the `<think>` Block
 
@@ -191,15 +238,16 @@ If Stage 2 GRPO is needed:
 ## Implementation Order
 
 ### Phase 1 — Stage 1 Data + SFT (prerequisite for GRPO)
-- [ ] `data/pipeline/generate_lines.py` — pull Lichess games from `austindavis/lichess_uci`,
+- [x] `data/pipeline/generate_lines.py` — pull Lichess games from `austindavis/lichess_uci`,
   sample by ELO tier, extract (FEN, move) at non-opening positions, run Stockfish `multipv 3`,
-  map cp → eval label (no cp in output), emit JSONL
+  map cp → eval label (no cp in output), annotate moves with `annotate_move()`, emit JSONL
 - [ ] Add line generator system prompt to `src/tutor/prompts.py`
 - [ ] `recipes-train/qwen3-4b-lines/` — SFT recipe for line generator task
   (reuses `training/lib.py`, new `train.py` with same 8-bit DDP setup)
 
 ### Phase 2 — Stage 1 GRPO
-- [ ] `src/verification/rewards.py` — R1 legality, R2 opponent quality, R3 eval accuracy, R4 relevance
+- [ ] `src/verification/rewards.py` — R1 legality, R2 opponent quality, R3 eval accuracy,
+  R4a structural annotation check (`score_annotation_structural` using `annotate_move()`), R5 relevance
 - [ ] `training/lib_rl.py` — GRPO loop: rollout generation, reward aggregation, policy update
 - [ ] `recipes-train/qwen3-4b-grpo/` — GRPO recipe wrapping lib_rl
 
@@ -208,8 +256,8 @@ If Stage 2 GRPO is needed:
 - [ ] Update `src/tutor/web.py` / `src/tutor/review.py` — two-stage inference call
 - [ ] Eval: compare single-stage SFT vs two-stage (SFT lines + SFT coach) on 50 real games
 
-### Phase 4 — Stage 2 GRPO (optional, only if needed)
-- [ ] `src/tutor/judge.py` — async Haiku judge with structured rubric
+### Phase 4 — Stage 2 GRPO + R4b (optional, only if needed)
+- [ ] `src/tutor/judge.py` — async Haiku judge for R4b enrichment quality + Stage 2 coach reward
 - [ ] GRPO run on coach model with Haiku reward
 
 ---

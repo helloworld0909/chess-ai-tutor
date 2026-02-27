@@ -16,6 +16,7 @@ from generate_lines import (
     annotate_move,
     cp_to_label,
     generate_lines_for_position,
+    score_annotation_structural,
 )
 
 # ---------------------------------------------------------------------------
@@ -193,6 +194,64 @@ class TestAnnotateMove:
                 annotation = annotate_move(board, mv)
                 assert annotation.endswith(" check")
                 break
+
+
+# ---------------------------------------------------------------------------
+# score_annotation_structural
+# ---------------------------------------------------------------------------
+
+
+class TestScoreAnnotationStructural:
+    def test_correct_non_capture(self):
+        board = chess.Board()
+        move = chess.Move.from_uci("e2e4")
+        assert score_annotation_structural(board, move, "move pawn") == 1.0
+
+    def test_correct_capture(self):
+        # e4 e5 d4 exd4 — white plays cxd4
+        board = chess.Board("rnbqkbnr/pppp1ppp/8/8/3pP3/8/PPP2PPP/RNBQKBNR w KQkq - 0 3")
+        move = chess.Move.from_uci("e4d5")  # not a real capture here; use a known capture
+        # Set up a real capture: pawn on e4 can capture on d5
+        board2 = chess.Board("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2")
+        move2 = chess.Move.from_uci("e4d5")
+        assert score_annotation_structural(board2, move2, "capture pawn") == 1.0
+
+    def test_wrong_capture_flag(self):
+        # Non-capture move but annotation says "capture"
+        board = chess.Board()
+        move = chess.Move.from_uci("e2e4")
+        assert score_annotation_structural(board, move, "capture pawn") == -1.0
+
+    def test_wrong_piece_name(self):
+        board = chess.Board()
+        move = chess.Move.from_uci("e2e4")
+        assert score_annotation_structural(board, move, "move knight") == -1.0
+
+    def test_missing_check(self):
+        # Scholar's mate setup: Qh5 gives check
+        board = chess.Board("rnbqkbnr/pppp1ppp/8/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 2 3")
+        move = chess.Move.from_uci("h5f7")
+        assert board.gives_check(move)
+        # Annotation missing "check" — should penalise
+        assert score_annotation_structural(board, move, "capture pawn") == -1.0
+
+    def test_spurious_check(self):
+        # Non-check move but annotation claims check
+        board = chess.Board()
+        move = chess.Move.from_uci("e2e4")
+        assert not board.gives_check(move)
+        assert score_annotation_structural(board, move, "move pawn check") == -1.0
+
+    def test_correct_check_annotation(self):
+        board = chess.Board("rnbqkbnr/pppp1ppp/8/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 2 3")
+        move = chess.Move.from_uci("h5f7")
+        assert score_annotation_structural(board, move, "capture pawn check") == 1.0
+
+    def test_richer_annotation_passes_structural(self):
+        # "develop knight" is richer but structurally correct — piece name present, no capture
+        board = chess.Board()
+        move = chess.Move.from_uci("g1f3")
+        assert score_annotation_structural(board, move, "develop knight") == 1.0
 
 
 # ---------------------------------------------------------------------------
