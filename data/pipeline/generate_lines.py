@@ -225,6 +225,54 @@ def _extract_positions_from_transcript(
 
 
 # ---------------------------------------------------------------------------
+# Move annotation
+# ---------------------------------------------------------------------------
+
+_PIECE_NAMES = {
+    chess.PAWN: "pawn",
+    chess.KNIGHT: "knight",
+    chess.BISHOP: "bishop",
+    chess.ROOK: "rook",
+    chess.QUEEN: "queen",
+    chess.KING: "king",
+}
+
+
+def annotate_move(board: chess.Board, move: chess.Move) -> str:
+    """Return a simple deterministic annotation for a move.
+
+    Covers castling, promotion, captures, and checks. This placeholder
+    gives the output format its shape; richer purpose annotations come
+    later via GRPO/Haiku fine-tuning.
+    """
+    if board.is_castling(move):
+        side = "kingside" if board.is_kingside_castling(move) else "queenside"
+        suffix = " check" if board.gives_check(move) else ""
+        return f"castle {side}{suffix}"
+
+    piece = board.piece_at(move.from_square)
+    piece_name = _PIECE_NAMES.get(piece.piece_type, "piece") if piece else "piece"
+
+    if move.promotion:
+        promo_name = _PIECE_NAMES.get(move.promotion, "queen")
+        suffix = " check" if board.gives_check(move) else ""
+        return f"promote to {promo_name}{suffix}"
+
+    if board.is_capture(move):
+        captured = board.piece_at(move.to_square)
+        if captured:
+            cap_name = _PIECE_NAMES.get(captured.piece_type, "piece")
+            suffix = " check" if board.gives_check(move) else ""
+            return f"capture {cap_name}{suffix}"
+        # en passant — captured pawn is not on to_square
+        suffix = " check" if board.gives_check(move) else ""
+        return f"capture pawn{suffix}"
+
+    suffix = " check" if board.gives_check(move) else ""
+    return f"move {piece_name}{suffix}"
+
+
+# ---------------------------------------------------------------------------
 # Line generation
 # ---------------------------------------------------------------------------
 
@@ -253,19 +301,21 @@ async def generate_lines_for_position(
         if not line.pv:
             continue
 
-        # Convert UCI PV to SAN, playing out from post-move position
+        # Convert UCI PV to SAN with annotations, playing out from post-move position
         line_board = chess.Board(post_move_fen)
-        san_moves: list[str] = []
+        annotated_moves: list[str] = []
         valid = True
         for uci_mv in line.pv:
             try:
                 mv = chess.Move.from_uci(uci_mv)
-                san_moves.append(line_board.san(mv))
+                san = line_board.san(mv)
+                annotation = annotate_move(line_board, mv)
+                annotated_moves.append(f"{san} ({annotation})")
                 line_board.push(mv)
             except Exception:
                 valid = False
                 break
-        if not valid or not san_moves:
+        if not valid or not annotated_moves:
             continue
 
         # Eval label from final position score (white perspective)
@@ -276,7 +326,7 @@ async def generate_lines_for_position(
             mate_value=score.mate_in or 0,
         )
 
-        moves_str = " → ".join(san_moves)
+        moves_str = " → ".join(annotated_moves)
         formatted_lines.append(f"LINE {i}: {moves_str} | eval: {label}")
 
     return formatted_lines

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "data" / "pipeline"))
 from generate_lines import (
     LABEL_WINNING_BLACK,
     _extract_positions_from_transcript,
+    annotate_move,
     cp_to_label,
     generate_lines_for_position,
 )
@@ -143,6 +144,58 @@ class TestExtractPositions:
 
 
 # ---------------------------------------------------------------------------
+# annotate_move
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotateMove:
+    def test_pawn_move(self):
+        board = chess.Board()
+        move = chess.Move.from_uci("e2e4")
+        assert annotate_move(board, move) == "move pawn"
+
+    def test_knight_move(self):
+        board = chess.Board()
+        move = chess.Move.from_uci("g1f3")
+        assert annotate_move(board, move) == "move knight"
+
+    def test_bishop_capture_with_check(self):
+        board = chess.Board("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 4")
+        move = chess.Move.from_uci("c4f7")
+        assert annotate_move(board, move) == "capture pawn check"
+
+    def test_capture_pawn_with_check(self):
+        board = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+        move = chess.Move.from_uci("c4f7")
+        assert annotate_move(board, move) == "capture pawn check"
+
+    def test_kingside_castle(self):
+        board = chess.Board("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQK2R w KQkq - 4 5")
+        move = chess.Move.from_uci("e1g1")
+        assert annotate_move(board, move) == "castle kingside"
+
+    def test_queenside_castle(self):
+        board = chess.Board("r3kbnr/ppp1pppp/2nq4/3p1b2/3P1B2/2NQ4/PPP1PPPP/R3KBNR w KQkq - 6 6")
+        move = chess.Move.from_uci("e1c1")
+        assert annotate_move(board, move) == "castle queenside"
+
+    def test_promotion(self):
+        board = chess.Board("8/P7/8/8/8/8/8/4K1k1 w - - 0 1")
+        move = chess.Move.from_uci("a7a8q")
+        assert annotate_move(board, move) == "promote to queen"
+
+    def test_check_suffix(self):
+        # Nf3-e5+ check
+        board = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3")
+        # Find a move that gives check
+        for mv in board.legal_moves:
+            if board.gives_check(mv):
+                annotation = annotate_move(board, mv)
+                assert annotation.endswith(" check")
+                break
+
+
+# ---------------------------------------------------------------------------
 # generate_lines_for_position
 # ---------------------------------------------------------------------------
 
@@ -249,3 +302,6 @@ class TestGenerateLinesForPosition:
         assert "g1f3" not in lines[0]
         assert "e5" in lines[0]
         assert "Nf3" in lines[0]
+        # Should contain annotations in parentheses
+        assert "(" in lines[0]
+        assert ")" in lines[0]
