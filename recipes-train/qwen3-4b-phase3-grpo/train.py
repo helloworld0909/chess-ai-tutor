@@ -141,16 +141,17 @@ def setup_model_and_tokenizer(config: dict):
     tokenizer.padding_side = "left"  # GRPOTrainer requires left-padding for generation
 
     n_gpus = torch.cuda.device_count()
-    log.info("Loading base model in 8-bit across %d GPU(s)", n_gpus)
+    # DDP: each rank gets its own GPU replica.  local_rank is set by torchrun
+    # via LOCAL_RANK env var. Falls back to 0 for single-process launch.
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    log.info("Loading base model in 8-bit on GPU %d (of %d)", local_rank, n_gpus)
     bnb_config = BitsAndBytesConfig(load_in_8bit=True)
-    # device_map="auto" spreads across all visible GPUs to avoid OOM
-    device_map: dict | str = {"": 0} if n_gpus == 1 else "auto"
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
         quantization_config=bnb_config,
         dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map=device_map,
+        device_map={"": local_rank},
         attn_implementation=model_cfg.get("attn_implementation", "sdpa"),
     )
 

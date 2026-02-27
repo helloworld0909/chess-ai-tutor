@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# GRPO training — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=32)
-# Single GPU (cuda:0) — GRPO rollout generation dominates; DDP adds overhead
-# Rewards: R1 legality + R3 eval accuracy + R4a annotations + R5 relevance
-# Output: checkpoints/chess-tutor-4b-grpo/
+# GRPO training — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=64)
+# 2-GPU DDP via torchrun — each rank gets a full model replica on its own GPU.
+# DDP doubles effective throughput vs single-GPU: each GPU processes its own
+# batch of rollouts in parallel, then gradients are all-reduced.
+# Rewards: R1 legality + R2 eval accuracy + R3a annotations + R4 depth + R5 breadth + R6 relevance
+# Output: checkpoints/qwen3-4b-phase3-grpo/
 #
 # Usage:
 #   ./recipes-train/qwen3-4b-phase3-grpo/start.sh
 #   ./recipes-train/qwen3-4b-phase3-grpo/start.sh --resume           # resume last checkpoint
-#   ./recipes-train/qwen3-4b-phase3-grpo/start.sh --resume checkpoints/chess-tutor-4b-grpo/checkpoint-300
+#   ./recipes-train/qwen3-4b-phase3-grpo/start.sh --resume checkpoints/qwen3-4b-phase3-grpo/checkpoint-300
 #
 # Logs: /tmp/chess-grpo.log
 # Stop: ./recipes-train/qwen3-4b-phase3-grpo/stop.sh
@@ -40,7 +42,7 @@ source "$REPO_ROOT/.venv/bin/activate"
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
-export CUDA_VISIBLE_DEVICES=0        # single GPU for GRPO
+export CUDA_VISIBLE_DEVICES=0,1
 export STOCKFISH_PATH="${STOCKFISH_PATH:-$HOME/.local/bin/stockfish}"
 # src/ must be on PYTHONPATH so `from verification.rewards import ...` works
 export PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}"
@@ -52,19 +54,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "Config    : $CONFIG"
-echo "Device    : cuda:0 (single GPU)"
+echo "Device    : cuda:0,1 (2-GPU DDP via torchrun)"
 echo "Stockfish : $STOCKFISH_PATH"
 echo "Log       : $LOG_FILE"
 echo ""
 
-TRAIN_CMD="python $RECIPE_DIR/train.py --config $CONFIG ${EXTRA_ARGS[*]:-}"
+TRAIN_CMD="torchrun --nproc_per_node=2 $RECIPE_DIR/train.py --config $CONFIG ${EXTRA_ARGS[*]:-}"
 
 # shellcheck disable=SC2086
 nohup bash -c "source $REPO_ROOT/.venv/bin/activate \
   && export PYTORCH_ALLOC_CONF=expandable_segments:True \
   && export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   && export TRANSFORMERS_NO_ADVISORY_WARNINGS=1 \
-  && export CUDA_VISIBLE_DEVICES=0 \
+  && export CUDA_VISIBLE_DEVICES=0,1 \
   && export STOCKFISH_PATH=${STOCKFISH_PATH} \
   && export PYTHONPATH=$REPO_ROOT/src:${PYTHONPATH:-} \
   && $TRAIN_CMD" \

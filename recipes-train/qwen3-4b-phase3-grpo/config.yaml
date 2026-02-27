@@ -1,10 +1,10 @@
-# GRPO configuration — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=32)
+# GRPO configuration — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=64)
 # Stage 1: Line generator RL with verifiable chess rewards
 #
-# Parallelism: single GPU (GRPO rollout generation dominates; DDP adds overhead)
+# Parallelism: 2-GPU DDP via torchrun (each rank = full model replica on own GPU)
 # Rewards: R1 legality (gate) + R2 eval accuracy (0.28) + R3a annotation (0.12)
-#          + R4 depth (0.10) + R5 breadth (0.10) + R6 opponent quality (0.10) + R7 relevance (0.05)
-# R1=0 short-circuits all downstream rewards to -1.0
+#          + R4 depth (0.10) + R5 breadth (0.10) + R6 relevance (0.05)
+# R1<0 short-circuits all downstream rewards to -1.0
 
 model:
   model_name: "checkpoints/qwen3-4b-phase2-lines-sft/checkpoint-350"
@@ -31,16 +31,16 @@ training:
   eval_file:  data/processed/lines_sft_eval.jsonl
 
   # Rollout generation
-  # generation_batch_size = per_device_train_batch_size (1 process with device_map="auto").
-  # num_generations must divide generation_batch_size exactly.
-  # 4 completions × 1500 tokens at ~40 tok/s ≈ 2 min/batch — acceptable for RL
+  # With DDP (2 ranks): generation_batch_size = per_device_train_batch_size × world_size.
+  # num_generations must divide per_device_train_batch_size exactly.
+  # 8 completions × 1500 tokens at ~40 tok/s × 2 GPUs ≈ same wall-clock, 2× throughput
   num_generations: 4          # completions sampled per prompt per step
   max_prompt_length: 600      # tokens (system + user only — measured p99=519)
   max_completion_length: 1500 # short thinking (~1000) + 3 lines (~400)
 
   # Batch
-  per_device_train_batch_size: 4   # generation_batch_size=4, divisible by num_generations=4 ✓
-  gradient_accumulation_steps: 2   # effective batch = 8 prompts × 4 gen = 32 rollouts
+  per_device_train_batch_size: 4   # per GPU; total generation_batch_size=8 (2 GPUs × 4)
+  gradient_accumulation_steps: 2   # effective batch = 8 prompts/GPU × 2 GPUs × 4 gen = 64 rollouts
 
   # Optimiser
   learning_rate: 5.0e-6
