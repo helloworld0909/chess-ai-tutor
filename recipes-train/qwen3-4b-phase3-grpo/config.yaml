@@ -56,7 +56,10 @@ training:
   max_grad_norm: 0.1
 
   # GRPO hyperparameters
-  beta: 0.04      # KL penalty — keeps policy close to SFT checkpoint
+  # beta=0.001: near-zero KL penalty. The Phase 2 SFT reference is weak (illegal moves),
+  # so we don't want to be pulled back toward it. Near-zero prevents numerical instability
+  # while letting the policy diverge freely toward legal/correct outputs.
+  beta: 0.001     # near-zero KL — reference model is bad, don't punish divergence
   epsilon: 0.2    # PPO clip ratio
 
   # Generation sampling
