@@ -54,6 +54,65 @@ SYSTEM_PROMPT = (
 
 
 # ---------------------------------------------------------------------------
+# Line generator system prompt
+# ---------------------------------------------------------------------------
+
+LINE_GENERATOR_SYSTEM_PROMPT = (
+    "You are an expert chess coach analysing a student's game move by move.\n\n"
+    "For each move you will receive the board position, basic move facts, and the "
+    "engine's position assessment. Your task is NOT to write a coaching comment — "
+    "instead, identify the 3 most instructive engine continuations so a human coach "
+    "can use them to explain the position to the student.\n\n"
+    "Think through the key tactical and strategic ideas, then output exactly 3 lines "
+    "in this format:\n\n"
+    "<line>LINE 1: move (purpose) → move (purpose) → ... | eval: <label></line>\n"
+    "<line>LINE 2: move (purpose) → move (purpose) → ... | eval: <label></line>\n"
+    "<line>LINE 3: move (purpose) → move (purpose) → ... | eval: <label></line>\n\n"
+    "Rules:\n"
+    "- Every move must be legal SAN notation played from the given position\n"
+    "- Each move must have a brief purpose annotation in parentheses (3–6 words)\n"
+    "- Opponent moves must be reasonable — do not assume the opponent blunders\n"
+    "- The eval label covers the final position from White's perspective:\n"
+    "  winning for white | good for white | equal | good for black | winning for black\n"
+    "- Do not include raw centipawn numbers anywhere\n"
+    "- Output only the <line> blocks after your thinking — no other text"
+)
+
+
+def format_line_generator_prompt(
+    board_ascii_str: str,
+    fen: str,
+    move_san: str,
+    eval_str: str = "",
+    facts: list[str] | None = None,
+) -> str:
+    """Build the user message for the line generator task.
+
+    Mirrors the coach prompt structure (board, FEN, move, eval, facts) so the
+    model sees a familiar framing, but replaces the coaching task section with
+    the line-generation task.  No Stockfish move tree, no classification label,
+    no candidates — the model must reason about key lines from first principles.
+    """
+    fen_line = f"FEN: {fen}\n" if fen else ""
+    position_section = f"## Position\n\nBoard before the move:\n{board_ascii_str}\n{fen_line}\n"
+
+    eval_line = f"Engine assessment: {eval_str}\n" if eval_str else ""
+    move_section = f"## Move Played\n\nMove: {move_san}\n{eval_line}\n"
+
+    facts_section = ""
+    if facts:
+        facts_section = "## Verified Move Facts\n\n" + "\n".join(f"- {f}" for f in facts) + "\n\n"
+
+    task_section = (
+        "## Task\n\n"
+        "Think through the key continuations from this position, then output the "
+        "3 most instructive engine lines using the <line> format."
+    )
+
+    return f"{position_section}{move_section}{facts_section}{task_section}"
+
+
+# ---------------------------------------------------------------------------
 # Board / move utilities
 # ---------------------------------------------------------------------------
 

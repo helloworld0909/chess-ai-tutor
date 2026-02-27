@@ -74,6 +74,35 @@ def load_jsonl(path: str) -> Dataset:
     return Dataset.from_list(data)
 
 
+def load_jsonl_lines(path: str) -> Dataset:
+    """Load JSONL for the line-generator task.
+
+    Unlike load_jsonl, accepts any source tag — the lines SFT files use
+    'lichess_lines_sft' rather than 'textbook'.
+    """
+    data = []
+    total_found = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                sample = json.loads(line)
+                total_found += 1
+                if "messages" in sample:
+                    data.append({"messages": sample["messages"]})
+            except json.JSONDecodeError:
+                continue
+    logger.info(
+        "Loaded %d line-generator samples (out of %d total) from %s",
+        len(data),
+        total_found,
+        path,
+    )
+    return Dataset.from_list(data)
+
+
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 

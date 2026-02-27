@@ -1,14 +1,13 @@
-# Training configuration for Qwen3-4B-Thinking POC
-# Chess Tutor SFT with QLoRA
+# Line-generator SFT — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=64)
+# Teaches the model the <line> output format before GRPO.
+# DDP: 2× RTX 5090  |  28k train / 1.4k eval
 
-# Model settings
 model:
   model_name: "Qwen/Qwen3-4B-Thinking-2507"
   quantization: "8bit"
   attn_implementation: "sdpa"
   torch_dtype: bfloat16
 
-# LoRA
 lora:
   r: 64
   alpha: 128
@@ -24,16 +23,15 @@ lora:
   bias: none
   task_type: CAUSAL_LM
 
-# Training
 training:
-  train_file: data/processed/train.jsonl
-  eval_file: data/processed/eval.jsonl
-  max_seq_length: 2304
+  train_file: data/processed/lines_sft.jsonl
+  eval_file:  data/processed/lines_sft_eval.jsonl
+  max_seq_length: 1280   # covers p99=1054 with headroom
   packing: false
 
   per_device_train_batch_size: 5
   per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 8   # effective batch = 80 (same as coach SFT)
 
   learning_rate: 1.0e-4
   lr_scheduler_type: cosine
@@ -54,13 +52,11 @@ training:
   eval_steps: 50
   save_strategy: steps
   save_steps: 50
-  save_total_limit: 10
+  save_total_limit: 5
 
   seed: 42
 
-# Output
-output_dir: checkpoints/chess-tutor-4b-poc
+output_dir: checkpoints/qwen3-4b-phase2-lines-sft
 
-# Wandb
 wandb:
   enabled: false

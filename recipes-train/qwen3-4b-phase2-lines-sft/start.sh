@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# SFT training — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=64)
-# DDP: 2× RTX 5090  |  Batch: 5/GPU × 8 grad-accum = 80 effective
-# Output: checkpoints/chess-tutor-4b-poc/
+# Line-generator SFT — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=64)
+# DDP: 2× RTX 5090  |  10k train / 500 eval
+# Output: checkpoints/chess-lines-4b-sft/
 #
 # Usage:
-#   ./recipes-train/qwen3-4b-sft/start.sh
-#   ./recipes-train/qwen3-4b-sft/start.sh --deepspeed
+#   ./recipes-train/qwen3-4b-phase2-lines-sft/start.sh
+#   ./recipes-train/qwen3-4b-phase2-lines-sft/start.sh --resume
 #
-# Logs: /tmp/chess-train.log
-# Stop: ./recipes-train/qwen3-4b-sft/stop.sh
+# Logs: /tmp/chess-lines-train.log
+# Stop: ./recipes-train/qwen3-4b-phase2-lines-sft/stop.sh
 
 set -euo pipefail
 
@@ -16,14 +16,12 @@ RECIPE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$(dirname "$RECIPE_DIR")")"
 cd "$REPO_ROOT"
 
-LOG_FILE="/tmp/chess-train.log"
-PID_FILE="/tmp/chess-train.pid"
+LOG_FILE="/tmp/chess-lines-train.log"
+PID_FILE="/tmp/chess-lines-train.pid"
 CONFIG="$RECIPE_DIR/config.yaml"
 NPROC=2
 EXTRA_ARGS=()
-USE_DEEPSPEED=false
 
-# Fail if already running
 if [[ -f "$PID_FILE" ]]; then
   EXISTING_PID=$(cat "$PID_FILE")
   if kill -0 "$EXISTING_PID" 2>/dev/null; then
@@ -41,18 +39,9 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 
-# Parse extra arguments
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --deepspeed) USE_DEEPSPEED=true; shift ;;
-    *)           EXTRA_ARGS+=("$1"); shift ;;
-  esac
+  EXTRA_ARGS+=("$1"); shift
 done
-
-if [[ "$USE_DEEPSPEED" == "true" ]]; then
-  echo "DeepSpeed ZeRO-2 enabled"
-  export DEEPSPEED_ENABLED=1
-fi
 
 echo "Config : $CONFIG"
 echo "Devices: $NPROC GPUs (DDP)"

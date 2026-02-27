@@ -1,0 +1,79 @@
+# GRPO configuration — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=32)
+# Stage 1: Line generator RL with verifiable chess rewards
+#
+# Parallelism: single GPU (GRPO rollout generation dominates; DDP adds overhead)
+# Rewards: R1 legality (0.25) + R3 eval accuracy (0.30) + R4a annotations (0.15) + R5 relevance (0.10)
+
+model:
+  model_name: "Qwen/Qwen3-4B-Thinking-2507"
+  quantization: "8bit"
+  attn_implementation: "sdpa"
+  torch_dtype: bfloat16
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  bias: none
+
+training:
+  train_file: data/processed/lines_sft.jsonl
+  eval_file:  data/processed/lines_sft_eval.jsonl
+
+  # Rollout generation
+  num_generations: 8          # completions sampled per prompt per step
+  max_prompt_length: 600      # tokens (system + user only — measured p99=519)
+  max_completion_length: 768  # tokens for <think> + <line> × 3 (p99 ~580 + headroom)
+
+  # Batch
+  per_device_train_batch_size: 1   # 1 prompt × 8 generations = 8 rollouts/step
+  gradient_accumulation_steps: 4   # effective batch = 4 prompts × 8 gen = 32 rollouts
+
+  # Optimiser
+  learning_rate: 5.0e-6
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  num_train_epochs: 1
+  optim: adamw_8bit
+  weight_decay: 0.01
+  max_grad_norm: 0.1
+
+  # GRPO hyperparameters
+  beta: 0.04      # KL penalty — keeps policy close to SFT checkpoint
+  epsilon: 0.2    # PPO clip ratio
+
+  # Generation sampling
+  temperature: 0.9
+  top_p: 0.95
+
+  # Infrastructure
+  bf16: true
+  gradient_checkpointing: true
+  seed: 42
+
+  # Logging / checkpointing
+  logging_steps: 5
+  eval_strategy: steps
+  eval_steps: 100
+  save_strategy: steps
+  save_steps: 100
+  save_total_limit: 5
+
+output_dir: checkpoints/qwen3-4b-phase3-grpo
+
+wandb:
+  enabled: false
+  project: chess-tutor-grpo
+  name: qwen3-4b-grpo-phase1
+  tags:
+    - grpo
+    - lines
+    - phase1

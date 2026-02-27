@@ -1,0 +1,268 @@
+"""GRPO training — Qwen3-4B-Thinking-2507 + QLoRA (8-bit, r=32).
+
+Stage 1 line generator: teaches the model to produce legally correct engine
+lines with accurate eval labels and structural move annotations.
+
+Parallelism: single GPU (GRPO rollout generation is the bottleneck, not
+weight updates — DDP adds synchronisation overhead without throughput gain).
+
+Reward functions (Phase 1, all free/cheap):
+    R1  — Move legality          weight 0.25
+    R3  — Eval label accuracy    weight 0.30  (Stockfish depth 18)
+    R4a — Structural annotations weight 0.15  (python-chess, free)
+    R5  — Line relevance         weight 0.10
+
+Usage (via recipe):
+    ./recipes-train/qwen3-4b-grpo/start.sh
+
+Direct:
+    STOCKFISH_PATH=/path/to/stockfish \\
+    python recipes-train/qwen3-4b-grpo/train.py \\
+        --config recipes-train/qwen3-4b-grpo/config.yaml
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+
+import torch
+import yaml
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+def load_config(path: str) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+
+
+def load_grpo_dataset(jsonl_path: str):
+    """Load the line-generator SFT JSONL as a GRPO prompt dataset.
+
+    GRPOTrainer expects a dataset with a 'prompt' column — a list of messages
+    up to (but not including) the final assistant turn.  We strip the last
+    assistant message (which contains the <line> targets) and keep the
+    system + user turns as the prompt.
+    """
+    from datasets import Dataset
+
+    rows: list[dict] = []
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msgs = rec.get("messages", [])
+            if not msgs:
+                continue
+            # Strip trailing assistant turn — that's what GRPO generates
+            if msgs[-1]["role"] == "assistant":
+                prompt_msgs = msgs[:-1]
+            else:
+                prompt_msgs = msgs
+            rows.append(
+                {
+                    "prompt": prompt_msgs,
+                    "fen": rec.get("metadata", {}).get("fen", ""),
+                    "move_san": rec.get("metadata", {}).get("move_san", ""),
+                }
+            )
+    log.info("Loaded %d GRPO prompt rows from %s", len(rows), jsonl_path)
+    return Dataset.from_list(rows)
+
+
+# ---------------------------------------------------------------------------
+# Model setup
+# ---------------------------------------------------------------------------
+
+
+def setup_model_and_tokenizer(config: dict):
+    from peft import LoraConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+    model_cfg = config["model"]
+    lora_cfg = config["lora"]
+    model_name = model_cfg["model_name"]
+
+    log.info("Loading tokenizer: %s", model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"  # GRPOTrainer requires left-padding for generation
+
+    log.info("Loading model in 8-bit on cuda:0")
+    bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        device_map={"": 0},  # single GPU
+        attn_implementation=model_cfg.get("attn_implementation", "sdpa"),
+    )
+
+    lora_config = LoraConfig(
+        r=lora_cfg.get("r", 32),
+        lora_alpha=lora_cfg.get("alpha", 64),
+        target_modules=lora_cfg.get(
+            "target_modules",
+            ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        ),
+        lora_dropout=lora_cfg.get("dropout", 0.05),
+        bias=lora_cfg.get("bias", "none"),
+        task_type="CAUSAL_LM",
+    )
+
+    return model, tokenizer, lora_config
+
+
+# ---------------------------------------------------------------------------
+# Reward wrappers
+# ---------------------------------------------------------------------------
+
+
+def _make_weighted_reward(fn, weight: float):
+    """Wrap a reward function to apply a scalar weight."""
+
+    def _wrapped(prompts, completions, **kwargs):
+        raw = fn(prompts, completions, **kwargs)
+        return [weight * v for v in raw]
+
+    _wrapped.__name__ = f"weighted_{fn.__name__}"
+    return _wrapped
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", "-c", default="recipes-train/qwen3-4b-grpo/config.yaml")
+    parser.add_argument("--resume", nargs="?", const=True, default=None, metavar="CHECKPOINT_DIR")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    train_cfg = config["training"]
+    wandb_cfg = config.get("wandb", {})
+
+    # ── Weights & Biases ──────────────────────────────────────────────────
+    if wandb_cfg.get("enabled"):
+        import wandb
+
+        wandb.init(
+            project=wandb_cfg.get("project", "chess-tutor-grpo"),
+            name=wandb_cfg.get("name"),
+            tags=wandb_cfg.get("tags", []),
+        )
+
+    # ── Model ─────────────────────────────────────────────────────────────
+    model, tokenizer, lora_config = setup_model_and_tokenizer(config)
+
+    # ── Dataset ───────────────────────────────────────────────────────────
+    train_dataset = load_grpo_dataset(train_cfg["train_file"])
+    eval_dataset = None
+    if train_cfg.get("eval_file"):
+        eval_dataset = load_grpo_dataset(train_cfg["eval_file"])
+
+    # ── Reward functions ──────────────────────────────────────────────────
+    from verification.rewards import (
+        reward_annotation_structural,
+        reward_eval_accuracy,
+        reward_legality,
+        reward_relevance,
+    )
+
+    reward_fns = [
+        _make_weighted_reward(reward_legality, 0.25),
+        _make_weighted_reward(reward_eval_accuracy, 0.30),
+        _make_weighted_reward(reward_annotation_structural, 0.15),
+        _make_weighted_reward(reward_relevance, 0.10),
+    ]
+
+    # ── GRPOConfig ────────────────────────────────────────────────────────
+    from trl import GRPOConfig, GRPOTrainer
+
+    grpo_config = GRPOConfig(
+        output_dir=config.get("output_dir", "checkpoints/chess-tutor-4b-grpo"),
+        # Rollout generation
+        num_generations=train_cfg.get("num_generations", 8),
+        max_prompt_length=train_cfg.get("max_prompt_length", 1024),
+        max_completion_length=train_cfg.get("max_completion_length", 512),
+        # Training
+        per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", 1),
+        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
+        num_train_epochs=train_cfg.get("num_train_epochs", 1),
+        max_steps=train_cfg.get("max_steps", -1),
+        learning_rate=train_cfg.get("learning_rate", 5e-6),
+        lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
+        warmup_ratio=train_cfg.get("warmup_ratio", 0.05),
+        optim=train_cfg.get("optim", "adamw_8bit"),
+        weight_decay=train_cfg.get("weight_decay", 0.01),
+        max_grad_norm=train_cfg.get("max_grad_norm", 0.1),
+        # Logging / checkpointing
+        logging_steps=train_cfg.get("logging_steps", 5),
+        logging_first_step=True,
+        eval_strategy=train_cfg.get("eval_strategy", "steps") if eval_dataset else "no",
+        eval_steps=train_cfg.get("eval_steps", 100),
+        save_strategy=train_cfg.get("save_strategy", "steps"),
+        save_steps=train_cfg.get("save_steps", 100),
+        save_total_limit=train_cfg.get("save_total_limit", 5),
+        bf16=train_cfg.get("bf16", True),
+        gradient_checkpointing=train_cfg.get("gradient_checkpointing", True),
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        seed=train_cfg.get("seed", 42),
+        # GRPO-specific
+        beta=train_cfg.get("beta", 0.04),  # KL penalty coefficient
+        epsilon=train_cfg.get("epsilon", 0.2),  # PPO clip ratio
+        report_to="wandb" if wandb_cfg.get("enabled") else "none",
+        # Generation params — allow thinking
+        temperature=train_cfg.get("temperature", 0.9),
+        top_p=train_cfg.get("top_p", 0.95),
+    )
+
+    # ── Trainer ───────────────────────────────────────────────────────────
+    trainer = GRPOTrainer(
+        model=model,
+        reward_funcs=reward_fns,
+        args=grpo_config,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        processing_class=tokenizer,
+        peft_config=lora_config,
+    )
+
+    log.info("Starting GRPO training...")
+    trainer.train(resume_from_checkpoint=args.resume)
+
+    out = config.get("output_dir", "checkpoints/chess-tutor-4b-grpo")
+    log.info("Saving model to %s", out)
+    trainer.save_model()
+    tokenizer.save_pretrained(out)
+    log.info("Done.")
+
+
+if __name__ == "__main__":
+    main()
