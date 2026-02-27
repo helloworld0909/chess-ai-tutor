@@ -278,31 +278,42 @@ def main():
         def _write_parallel(
             self, step: int, completions: list, all_scores: list, reward_secs: float = 0.0
         ) -> None:
-            """Log all completions with per-reward breakdown.
-
-            all_scores: list of length num_funcs, each a list of length num_completions.
-            """
+            """Log reward summary table + best completion text each batch."""
             import datetime
 
-            totals = [
-                sum(all_scores[r][i] for r in range(self.num_funcs))
-                for i in range(len(completions))
-            ]
+            n = len(completions)
+            totals = [sum(all_scores[r][i] for r in range(self.num_funcs)) for i in range(n)]
+            best_i = max(range(n), key=lambda i: totals[i])
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             with open(self.log_path, "a") as f:
-                f.write(f"\n{'=' * 80}\n")
+                f.write(f"\n{'─' * 80}\n")
                 f.write(
-                    f"STEP {step}  ({len(completions)} completions)"
-                    f"  reward_time={reward_secs:.2f}s  {ts}\n"
+                    f"STEP {step}  {ts}  ({n} completions)  "
+                    f"reward_time={reward_secs:.2f}s  "
+                    f"mean={sum(totals) / n:+.3f}  "
+                    f"best={totals[best_i]:+.3f}  "
+                    f"worst={min(totals):+.3f}\n"
                 )
-                f.write(f"{'=' * 80}\n")
-                for i, (comp, total) in enumerate(zip(completions, totals)):
-                    comp_text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
-                    reward_parts = "  ".join(
-                        f"{_reward_names[r]}={all_scores[r][i]:+.3f}" for r in range(self.num_funcs)
+                # Full text of best completion first
+                best_text = (
+                    completions[best_i][-1]["content"]
+                    if isinstance(completions[best_i], list)
+                    else str(completions[best_i])
+                )
+                f.write(f"\n── Best completion [{best_i}] ──\n")
+                f.write(best_text.strip() + "\n")
+                # Compact reward table: one row per completion
+                header = f"\n  {'#':>2}  {'total':>7}  " + "  ".join(
+                    f"{name:>10}" for name in _reward_names
+                )
+                f.write(header + "\n")
+                for i, total in enumerate(totals):
+                    marker = " *" if i == best_i else "  "
+                    row = f"{marker}{i:>2}  {total:>+7.3f}  " + "  ".join(
+                        f"{all_scores[r][i]:>+10.3f}" for r in range(self.num_funcs)
                     )
-                    f.write(f"\n[{i}] total={total:+.3f}  {reward_parts}\n")
-                    f.write(f"{comp_text}\n")
+                    f.write(row + "\n")
 
     _logger = _RewardLogger(num_funcs=7)
 
@@ -363,7 +374,7 @@ def main():
         max_steps=train_cfg.get("max_steps", -1),
         learning_rate=train_cfg.get("learning_rate", 5e-6),
         lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
-        warmup_ratio=train_cfg.get("warmup_ratio", 0.05),
+        warmup_steps=train_cfg.get("warmup_steps", 10),
         optim=train_cfg.get("optim", "adamw_8bit"),
         weight_decay=train_cfg.get("weight_decay", 0.01),
         max_grad_norm=train_cfg.get("max_grad_norm", 0.1),
