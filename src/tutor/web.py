@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _stockfish = Stockfish(path=stockfish_path)
     await _stockfish.start()
 
-    llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8101/v1")
+    llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8100/v1")
     _llm_model = os.environ.get("LLM_MODEL", "chess-tutor")
     _llm_client = AsyncOpenAI(base_url=llm_base_url, api_key="dummy")
 
@@ -235,6 +235,7 @@ async def _llm_comment(
                     tool_choice="auto",
                     max_tokens=8192,
                     temperature=0.7,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
                 ),
                 timeout=300.0,
             )

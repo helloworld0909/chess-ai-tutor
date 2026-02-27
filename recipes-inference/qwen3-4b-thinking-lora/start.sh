@@ -10,7 +10,7 @@ set -e
 RECIPE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PROJECT_DIR="$(dirname "$(dirname "$RECIPE_DIR")")"
 
-ADAPTER_DIR="$PROJECT_DIR/checkpoints/chess-tutor-4b-poc/checkpoint-900"
+ADAPTER_DIR="$PROJECT_DIR/checkpoints/chess-tutor-4b-poc"
 if [[ ! -d "$ADAPTER_DIR" ]]; then
     echo "Error: LoRA adapter not found at $ADAPTER_DIR"
     echo "Run training first: ./scripts/start_train.sh --config training/configs/qwen3_4b.yaml --nproc 2"
@@ -27,8 +27,8 @@ echo "Adapter: $ADAPTER_DIR"
 docker compose -f "$RECIPE_DIR/docker-compose.yml" up -d
 
 echo ""
-echo "Health check : curl http://localhost:8101/health"
+echo "Health check : curl http://localhost:8100/health"
 echo "View logs    : docker logs -f chess-ai-vllm-4b-lora"
 echo ""
-echo "Fine-tuned : curl http://localhost:8101/v1/chat/completions -d '{\"model\":\"chess-tutor\",...}'"
-echo "Base model : curl http://localhost:8101/v1/chat/completions -d '{\"model\":\"Qwen/Qwen3-4B-Thinking-2507\",...}'"
+echo "Fine-tuned : curl http://localhost:8100/v1/chat/completions -d '{\"model\":\"chess-tutor\",...}'"
+echo "Base model : curl http://localhost:8100/v1/chat/completions -d '{\"model\":\"Qwen/Qwen3-4B-Thinking-2507\",...}'"

@@ -5,7 +5,7 @@ services:
     restart: on-failure
     ipc: host
     ports:
-      - "8101:8000"
+      - "8100:8000"
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
       - ~/.cache/vllm:/root/.cache/vllm
@@ -29,7 +29,7 @@ services:
       --tool-call-parser qwen3_coder
       --enable-lora
       --max-lora-rank 64
-      --lora-modules chess-tutor=/checkpoints/chess-tutor-4b-poc/checkpoint-900
+      --lora-modules chess-tutor=/checkpoints/chess-tutor-4b-poc
     deploy:
       resources:
         reservations:
