@@ -390,8 +390,8 @@ def test_analyze_llm_prompt_includes_board(client: TestClient):
     assert "a b c d e f g h" in user_content
 
 
-def test_analyze_llm_prompt_includes_before_after(client: TestClient):
-    """LLM user message includes both before and after position sections."""
+def test_analyze_llm_prompt_includes_position_and_facts(client: TestClient):
+    """LLM user message includes position section and verified move facts."""
     mock_llm = MagicMock()
     mock_response = MagicMock()
     mock_response.choices[0].message.content = "Good."
@@ -404,6 +404,7 @@ def test_analyze_llm_prompt_includes_before_after(client: TestClient):
 
     messages = mock_llm.chat.completions.create.call_args.kwargs["messages"]
     user_content = next(m["content"] for m in messages if m["role"] == "user")
-    assert "## Position before your move" in user_content
-    assert "## Position after your move" in user_content
-    assert "Verified Move Facts" not in user_content
+    assert "## Position" in user_content
+    assert "Board before your move" in user_content
+    # move_facts for e2e4 should include a pawn advance fact
+    assert "## Verified Move Facts" in user_content

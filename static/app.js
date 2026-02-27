@@ -12,7 +12,12 @@ let cg           = null;   // Chessground instance
 let currentGame  = null;   // full game object from /api/game/{id}
 let currentIndex = -1;     // -1 = start, 0..N-1 = after move[index]
 let flipped      = false;
-let analysisCache = {};    // "fen|uci" → analysis response
+let analysisCache = {};    // "fen|uci|model" → analysis response
+let compareMode  = false;  // true = show fine-tuned + base side by side
+
+// Model names (must match vLLM --lora-modules)
+const MODEL_LORA = 'chess-tutor';
+const MODEL_BASE = 'Qwen/Qwen3-4B-Thinking-2507';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -32,6 +37,11 @@ function fenTurn(fullFen) {
   return fullFen.split(' ')[1] === 'b' ? 'black' : 'white';
 }
 
+/** Escape HTML special characters for safe injection into innerHTML. */
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -46,6 +56,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   bindControls();
+  bindModelControls();
+  updateToggleLabels();
   await loadGameList();
 });
 
@@ -224,19 +236,78 @@ function updateGameInfo() {
   document.getElementById('result-badge').textContent = currentGame.result;
 }
 
+// ── Model toggle & compare ────────────────────────────────────────────────────
+
+function bindModelControls() {
+  document.getElementById('lora-toggle').addEventListener('change', () => {
+    updateToggleLabels();
+    if (compareMode) return; // toggle disabled in compare mode
+    if (currentIndex >= 0 && currentGame) {
+      const m = currentGame.moves[currentIndex];
+      fetchAnalysis(m.fen_before, m.uci);
+    }
+  });
+
+  document.getElementById('btn-compare').addEventListener('click', () => {
+    compareMode = !compareMode;
+    const btn = document.getElementById('btn-compare');
+    const label = document.getElementById('compare-mode-label');
+    const basePane = document.getElementById('analysis-content-base');
+    const toggle = document.getElementById('lora-toggle');
+    const wrapper = document.getElementById('analysis-wrapper');
+
+    if (compareMode) {
+      btn.classList.add('active');
+      label.hidden = false;
+      basePane.hidden = false;
+      wrapper.classList.add('compare-active');
+      toggle.disabled = true;
+    } else {
+      btn.classList.remove('active');
+      label.hidden = true;
+      basePane.hidden = true;
+      wrapper.classList.remove('compare-active');
+      toggle.disabled = false;
+    }
+
+    // Re-fetch for the current move
+    if (currentIndex >= 0 && currentGame) {
+      const m = currentGame.moves[currentIndex];
+      fetchAnalysis(m.fen_before, m.uci);
+    }
+  });
+}
+
+/** Return the active model name based on toggle state (single-pane mode). */
+function activeModel() {
+  return document.getElementById('lora-toggle').checked ? MODEL_LORA : MODEL_BASE;
+}
+
+function updateToggleLabels() {
+  const checked = document.getElementById('lora-toggle').checked;
+  document.getElementById('label-base').style.cssText  = checked ? '' : 'color:var(--text);font-weight:600';
+  document.getElementById('label-lora').style.cssText  = checked ? 'color:#64b5f6;font-weight:600' : '';
+}
+
 // ── Analysis ──────────────────────────────────────────────────────────────────
 
 async function fetchAnalysis(fen, moveUci) {
-  const key = `${fen}|${moveUci}`;
-  showAnalysisLoading();
+  if (compareMode) {
+    await fetchCompare(fen, moveUci);
+    return;
+  }
 
-  if (analysisCache[key]) { renderAnalysis(analysisCache[key]); return; }
+  const model = activeModel();
+  const key = `${fen}|${moveUci}|${model}`;
+  showAnalysisLoading(document.getElementById('analysis-content'));
+
+  if (analysisCache[key]) { renderAnalysis(analysisCache[key], document.getElementById('analysis-content')); return; }
 
   try {
     const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fen, move_uci: moveUci }),
+      body: JSON.stringify({ fen, move_uci: moveUci, model }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -244,26 +315,84 @@ async function fetchAnalysis(fen, moveUci) {
 
     // Only render if still the current move
     const cur = currentIndex >= 0 ? currentGame.moves[currentIndex] : null;
-    if (cur && `${cur.fen_before}|${cur.uci}` === key) renderAnalysis(data);
+    if (cur && `${cur.fen_before}|${cur.uci}` === `${fen}|${moveUci}`) {
+      renderAnalysis(data, document.getElementById('analysis-content'));
+    }
   } catch (err) {
-    showAnalysisError(err.message);
+    showAnalysisError(err.message, document.getElementById('analysis-content'));
   }
 }
 
-function renderAnalysis(data) {
-  const el  = document.getElementById('analysis-content');
+async function fetchCompare(fen, moveUci) {
+  const elLora = document.getElementById('analysis-content');
+  const elBase = document.getElementById('analysis-content-base');
+  showAnalysisLoading(elLora, 'Fine-tuned');
+  showAnalysisLoading(elBase, 'Base model');
+
+  const keyLora = `${fen}|${moveUci}|${MODEL_LORA}`;
+  const keyBase = `${fen}|${moveUci}|${MODEL_BASE}`;
+
+  const fetchOne = async (model, key) => {
+    if (analysisCache[key]) return analysisCache[key];
+    const res = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fen, move_uci: moveUci, model }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    analysisCache[key] = data;
+    return data;
+  };
+
+  // Fire both in parallel
+  const [loraResult, baseResult] = await Promise.allSettled([
+    fetchOne(MODEL_LORA, keyLora),
+    fetchOne(MODEL_BASE, keyBase),
+  ]);
+
+  const cur = currentIndex >= 0 ? currentGame.moves[currentIndex] : null;
+  if (!cur || `${cur.fen_before}|${cur.uci}` !== `${fen}|${moveUci}`) return;
+
+  if (loraResult.status === 'fulfilled') {
+    renderAnalysis(loraResult.value, elLora, 'Fine-tuned');
+  } else {
+    showAnalysisError(loraResult.reason?.message ?? 'error', elLora);
+  }
+  if (baseResult.status === 'fulfilled') {
+    renderAnalysis(baseResult.value, elBase, 'Base model');
+  } else {
+    showAnalysisError(baseResult.reason?.message ?? 'error', elBase);
+  }
+}
+
+function renderAnalysis(data, el, modelLabel) {
   const cls = data.classification;
 
-  // Tag move cell for CSS annotation badge (★ ?? ? !?)
-  const activeCell = document.querySelector('.move-cell.active');
-  if (activeCell) activeCell.dataset.class = cls;
+  // Tag move cell for CSS annotation badge (★ ?? ? !?) — only from primary pane
+  if (!modelLabel || modelLabel === 'Fine-tuned') {
+    const activeCell = document.querySelector('.move-cell.active');
+    if (activeCell) activeCell.dataset.class = cls;
+  }
 
   const sourceBadge = data.comment_source === 'llm'
     ? '<span class="source-badge source-llm">AI</span>'
     : '<span class="source-badge source-template">engine</span>';
 
+  const modelBadge = modelLabel
+    ? `<span class="model-badge">${modelLabel}</span>`
+    : '';
+
+  const thinkingBlock = data.thinking
+    ? `<details class="thinking-block">
+        <summary>Thinking</summary>
+        <pre class="thinking-text">${escapeHtml(data.thinking)}</pre>
+       </details>`
+    : '';
+
   el.innerHTML = `
     <div class="analysis-row">
+      ${modelBadge}
       <span class="class-pill class-${cls}">${cls}</span>
       <span class="eval-pill">${data.eval_before}</span>
       ${sourceBadge}
@@ -272,20 +401,22 @@ function renderAnalysis(data) {
       ? `<div class="best-move-row">Best: <strong>${data.best_move}</strong>${data.cp_loss > 0 ? ` (−${data.cp_loss} cp)` : ''}</div>`
       : ''}
     <p class="comment-text">${data.comment}</p>
+    ${thinkingBlock}
   `;
 }
 
-function showAnalysisLoading() {
-  document.getElementById('analysis-content').innerHTML =
-    '<span class="analysis-loading">Analyzing...</span>';
+function showAnalysisLoading(el, label) {
+  const prefix = label ? `<span class="model-badge">${label}</span> ` : '';
+  el.innerHTML = `${prefix}<span class="analysis-loading">Analyzing...</span>`;
 }
 
-function showAnalysisError(msg) {
-  document.getElementById('analysis-content').innerHTML =
-    `<span class="placeholder">Analysis unavailable: ${msg}</span>`;
+function showAnalysisError(msg, el) {
+  el.innerHTML = `<span class="placeholder">Analysis unavailable: ${msg}</span>`;
 }
 
 function clearAnalysis() {
   document.getElementById('analysis-content').innerHTML =
     '<p class="placeholder">Select a move to see analysis.</p>';
+  document.getElementById('analysis-content-base').innerHTML =
+    '<p class="placeholder">Base model analysis will appear here.</p>';
 }

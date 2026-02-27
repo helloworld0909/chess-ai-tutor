@@ -290,9 +290,196 @@ main {
   50%       { opacity: 0.4; }
 }
 
+/* ── Model toggle ─────────────────────────────────────────────── */
+.model-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.model-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  transition: color 0.15s;
+}
+
+/* Highlight the active side */
+#label-base:has(~ .toggle-track input:not(:checked)),
+#lora-toggle:not(:checked) ~ #label-base { color: var(--text); }
+
+.model-toggle:has(#lora-toggle:checked) #label-lora { color: #64b5f6; font-weight: 600; }
+.model-toggle:has(#lora-toggle:not(:checked)) #label-base { color: var(--text); font-weight: 600; }
+
+.toggle-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.toggle-track input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggle-thumb {
+  position: absolute;
+  inset: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.toggle-thumb::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 2px;
+  top: 2px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.toggle-track input:checked + .toggle-thumb {
+  background: #1a3a4a;
+  border-color: #64b5f6;
+}
+.toggle-track input:checked + .toggle-thumb::before {
+  transform: translateX(16px);
+  background: #64b5f6;
+}
+
+.toggle-track input:disabled + .toggle-thumb { opacity: 0.4; cursor: default; }
+
+/* ── Compare button ───────────────────────────────────────────── */
+.btn-compare {
+  background: var(--surface2);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.btn-compare:hover { background: var(--surface2); color: var(--text); border-color: #64b5f6; }
+.btn-compare.active { background: #1a3a4a; color: #64b5f6; border-color: #64b5f6; }
+
+/* ── Analysis panel title row ─────────────────────────────────── */
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.panel-title-row .panel-title { margin-bottom: 0; }
+
+.compare-label {
+  font-size: 0.7rem;
+  color: #64b5f6;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* ── Side-by-side compare layout ─────────────────────────────── */
+.analysis-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.analysis-wrapper.compare-active {
+  flex-direction: row;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.analysis-wrapper.compare-active .analysis-content {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  padding-right: 10px;
+}
+
+.analysis-wrapper.compare-active .analysis-content-alt {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Model badge ─────────────────────────────────────────────── */
+.model-badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: #1a3a2a;
+  color: #81c784;
+  white-space: nowrap;
+}
+
+/* ── Thinking block ───────────────────────────────────────────── */
+.thinking-block {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.thinking-block summary {
+  padding: 5px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  background: var(--surface2);
+  list-style: none;
+}
+
+.thinking-block summary::before {
+  content: '▶ ';
+  font-size: 0.6rem;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+
+.thinking-block[open] summary::before { transform: rotate(90deg); }
+
+.thinking-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 0.75rem;
+  font-family: 'Courier New', monospace;
+  color: var(--text-muted);
+  background: var(--bg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+
 /* ── Responsive ───────────────────────────────────────────────── */
 @media (max-width: 960px) {
   main { flex-direction: column; align-items: center; }
   #board { width: 360px; height: 360px; }
   .game-select { max-width: 200px; }
+  .analysis-wrapper.compare-active { flex-direction: column; }
+  .analysis-wrapper.compare-active .analysis-content { border-right: none; padding-right: 0; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 }

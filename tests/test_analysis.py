@@ -259,8 +259,6 @@ def test_format_user_prompt_includes_position_context():
         fen=chess.STARTING_FEN,
         position_context=ctx,
     )
-    assert "## Position Context before your move" in prompt
-    assert "## Position Context after your move" in prompt
-    assert "## Position before your move" in prompt
-    assert "## Position after your move" in prompt
+    assert "## Position Context" in prompt
+    assert "## Position" in prompt
     assert "Phase:" in prompt

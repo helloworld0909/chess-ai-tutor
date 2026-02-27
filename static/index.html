@@ -18,6 +18,15 @@
   <span class="logo">♟ Chess Game Review</span>
   <div class="header-right">
     <span id="username-label" class="username-label"></span>
+    <label class="model-toggle" title="Toggle between base and fine-tuned model">
+      <span class="model-label" id="label-base">Base</span>
+      <span class="toggle-track">
+        <input type="checkbox" id="lora-toggle" checked>
+        <span class="toggle-thumb"></span>
+      </span>
+      <span class="model-label" id="label-lora">Fine-tuned</span>
+    </label>
+    <button id="btn-compare" class="btn-compare" title="Compare fine-tuned vs base side-by-side">⇌ Compare</button>
     <select id="game-select" class="game-select">
       <option value="">Loading games...</option>
     </select>
@@ -53,9 +62,17 @@
     </div>
 
     <div class="analysis-panel">
-      <div class="panel-title">AI Analysis</div>
-      <div id="analysis-content" class="analysis-content">
-        <p class="placeholder">Select a move to see analysis.</p>
+      <div class="panel-title-row">
+        <span class="panel-title">AI Analysis</span>
+        <span id="compare-mode-label" class="compare-label" hidden>Fine-tuned vs Base</span>
+      </div>
+      <div id="analysis-wrapper" class="analysis-wrapper">
+        <div id="analysis-content" class="analysis-content">
+          <p class="placeholder">Select a move to see analysis.</p>
+        </div>
+        <div id="analysis-content-base" class="analysis-content analysis-content-alt" hidden>
+          <p class="placeholder">Base model analysis will appear here.</p>
+        </div>
       </div>
     </div>
   </section>

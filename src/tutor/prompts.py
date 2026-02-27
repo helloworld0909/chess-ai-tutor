@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 import chess
 
-from tutor.analysis import compute_position_context
-
 if TYPE_CHECKING:
     from tutor.analysis import TreeNode
 
@@ -327,6 +325,77 @@ def format_position_context(ctx: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def move_facts(board: chess.Board, move: chess.Move) -> list[str]:
+    """Return a list of concise, verified facts about a move.
+
+    These are deterministic, engine-free observations (captures, checks,
+    castling, promotion, etc.) that ground the LLM prompt and prevent
+    hallucination about basic move properties.
+
+    Args:
+        board: Position *before* the move is played.
+        move:  The move to describe.
+
+    Returns:
+        List of short fact strings, e.g. ["captures pawn on e5", "gives check"].
+    """
+    facts: list[str] = []
+
+    piece = board.piece_at(move.from_square)
+    if piece is None:
+        return facts
+
+    piece_name = chess.piece_name(piece.piece_type)
+
+    # Capture
+    captured = board.piece_at(move.to_square)
+    if board.is_en_passant(move):
+        ep_square = chess.square_name(move.to_square)
+        facts.append(f"captures pawn en passant on {ep_square}")
+    elif captured:
+        captured_name = chess.piece_name(captured.piece_type)
+        to_sq = chess.square_name(move.to_square)
+        facts.append(f"captures {captured_name} on {to_sq}")
+
+    # Castling
+    if board.is_castling(move):
+        if board.is_kingside_castling(move):
+            facts.append("castles kingside")
+        else:
+            facts.append("castles queenside")
+
+    # Promotion
+    if move.promotion:
+        promo_name = chess.piece_name(move.promotion)
+        facts.append(f"promotes pawn to {promo_name}")
+
+    # Check / checkmate — apply the move and test
+    board_copy = board.copy()
+    board_copy.push(move)
+    if board_copy.is_checkmate():
+        facts.append("delivers checkmate")
+    elif board_copy.is_check():
+        facts.append("gives check")
+
+    # Piece movement description (if not a simple pawn push or capture already described)
+    to_sq = chess.square_name(move.to_square)
+    from_sq = chess.square_name(move.from_square)
+    if piece.piece_type != chess.PAWN and not board.is_castling(move):
+        if captured:
+            pass  # already described above
+        else:
+            facts.append(f"moves {piece_name} from {from_sq} to {to_sq}")
+    elif piece.piece_type == chess.PAWN and not captured and not board.is_en_passant(move):
+        # Pawn push — note if it's a two-square advance
+        rank_diff = abs(chess.square_rank(move.to_square) - chess.square_rank(move.from_square))
+        if rank_diff == 2:
+            facts.append(f"advances pawn two squares to {to_sq}")
+        else:
+            facts.append(f"advances pawn to {to_sq}")
+
+    return facts
+
+
 def format_user_prompt(
     board_ascii_str: str,
     san: str,
@@ -336,31 +405,29 @@ def format_user_prompt(
     cp_loss: int = 0,
     candidates: list[str] | None = None,
     opponent_threats: list[str] | None = None,
+    facts: list[str] | None = None,
     fen: str = "",
     cct: dict[str, list[str]] | None = None,
     move_tree: list[TreeNode] | None = None,
     position_context: dict[str, Any] | None = None,
 ) -> str:
-    """Build the structured user message for the chess coaching prompt.
+    """Build the user message for the chess coaching prompt.
 
-    Uses ## section headers so the LLM can easily parse each component.
-    This is the single source of truth for the user prompt format — used
-    identically by the inference server and the training data pipeline.
+    Format matches the training data exactly — section headers, field labels,
+    and ordering must not change without retraining.
     """
-    # --- Section 1: Position before your move ---
+    # --- Section 1: Position ---
     position_section = ""
     if board_ascii_str:
         fen_line = f"FEN: {fen}\n" if fen else ""
-        position_section = f"## Position before your move\n\n{board_ascii_str}\n{fen_line}\n"
+        position_section = (
+            f"## Position\n\nBoard before your move:\n{board_ascii_str}\n{fen_line}\n"
+        )
 
-    # --- Section 2: Position Context before your move ---
+    # --- Section 2: Position Context ---
     ctx_section = ""
     if position_context:
-        ctx_text = format_position_context(position_context)
-        ctx_text = ctx_text.replace(
-            "## Position Context", "## Position Context before your move", 1
-        )
-        ctx_section = ctx_text + "\n"
+        ctx_section = format_position_context(position_context) + "\n"
 
     # --- Section 3: Move Played ---
     move_header = (
@@ -381,24 +448,10 @@ def format_user_prompt(
 
     move_section = move_header + best_line + candidates_line + threats_line + cct_line
 
-    # --- Section 4: Position after your move ---
-    after_section = ""
-    if fen and san:
-        try:
-            board_after = chess.Board(fen)
-            board_after.push_san(san)
-            after_ascii = board_ascii(board_after)
-            after_fen_line = f"FEN: {board_after.fen()}\n"
-            after_ctx_text = format_position_context(compute_position_context(board_after))
-            after_ctx_text = after_ctx_text.replace(
-                "## Position Context", "## Position Context after your move", 1
-            )
-            after_section = (
-                f"## Position after your move\n\n{after_ascii}\n{after_fen_line}\n"
-                f"{after_ctx_text}\n"
-            )
-        except Exception:
-            pass
+    # --- Section 4: Verified Move Facts ---
+    facts_section = ""
+    if facts:
+        facts_section = "## Verified Move Facts\n\n" + "\n".join(f"- {f}" for f in facts) + "\n\n"
 
     # --- Section 5: Continuation Tree ---
     tree_section = ""
@@ -410,10 +463,11 @@ def format_user_prompt(
         "## Coaching Task\n\n"
         "Explain the chess idea behind this move in 4-6 sentences. "
         "Cover the immediate tactical or positional purpose, the strategic plan it supports, "
-        "and any relevant opening theory, piece activity, pawn structure, or king safety considerations."
+        "and any relevant opening theory, piece activity, pawn structure, or king safety considerations. "
+        "If verified move facts are listed, do not contradict them."
     )
 
     return (
         f"{position_section}{ctx_section}{move_section}\n"
-        f"{after_section}{tree_section}{task_section}"
+        f"{facts_section}{tree_section}{task_section}"
     )

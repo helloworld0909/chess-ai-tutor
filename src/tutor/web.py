@@ -27,6 +27,7 @@ from tutor.prompts import (
     SYSTEM_PROMPT,
     board_ascii,
     format_user_prompt,
+    move_facts,
 )
 from tutor.tools import CHESS_TOOLS
 from tutor.tools import web_search as _web_search
@@ -38,7 +39,7 @@ _username: str = ""
 _llm_client: AsyncOpenAI | None = None
 _llm_model: str = ""
 
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ class GameDetail(BaseModel):
 class AnalyzeRequest(BaseModel):
     fen: str
     move_uci: str
+    model: str | None = None  # None = use server default (_llm_model)
 
 
 class AnalyzeResponse(BaseModel):
@@ -127,6 +129,7 @@ class AnalyzeResponse(BaseModel):
     eval_before: str  # e.g. "+0.35" or "M3"
     comment: str
     comment_source: str  # "llm" or "template"
+    thinking: str  # raw <think> block content, empty string if none
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +186,9 @@ async def _llm_comment(
     cct: dict[str, list[str]] | None = None,
     move_tree: list[Any] | None = None,
     position_context: dict[str, Any] | None = None,
-) -> tuple[str, str]:
+    facts: list[str] | None = None,
+    model: str | None = None,
+) -> tuple[str, str, str]:  # (comment, source, thinking)
     """Get an AI-generated comment for a move using a tool-calling loop.
 
     The LLM can call analyze_position (via Stockfish) and web_search to ground
@@ -191,11 +196,13 @@ async def _llm_comment(
     "llm" or "template".
     """
     if _llm_client is None:
-        return _generate_comment(san, classification, best_move, cp_loss == 0), "template"
+        return _generate_comment(san, classification, best_move, cp_loss == 0), "template", ""
 
     import json as _json
 
     import chess as _chess
+
+    effective_model = model or _llm_model
 
     prompt = format_user_prompt(
         board_ascii_str=board_ascii_str,
@@ -206,6 +213,7 @@ async def _llm_comment(
         cp_loss=cp_loss,
         candidates=candidates,
         opponent_threats=opponent_threats,
+        facts=facts,
         fen=fen,
         cct=cct,
         move_tree=move_tree,
@@ -229,7 +237,7 @@ async def _llm_comment(
         for _ in range(6):  # up to 4 tool calls + 1 answer + 1 safety
             response = await asyncio.wait_for(
                 _llm_client.chat.completions.create(  # type: ignore[call-overload]
-                    model=_llm_model,
+                    model=effective_model,
                     messages=messages,
                     tools=CHESS_TOOLS,
                     tool_choice="auto",
@@ -243,6 +251,13 @@ async def _llm_comment(
             msg = choice.message
 
             if choice.finish_reason == "tool_calls" and msg.tool_calls:
+                logger.debug(
+                    "LLM tool call (move %s): %s",
+                    san,
+                    ", ".join(
+                        f"{tc.function.name}({tc.function.arguments})" for tc in msg.tool_calls
+                    ),
+                )
                 messages.append(
                     {
                         "role": "assistant",
@@ -294,16 +309,23 @@ async def _llm_comment(
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
                 continue
 
-            # finish_reason == "stop" — strip <think> blocks and return
-            text = msg.content or ""
-            text = _THINK_RE.sub("", text).strip()
+            # finish_reason == "stop" — extract <think> block, strip it from comment
+            raw = msg.content or ""
+            logger.debug(
+                "LLM raw output (move %s):\n--- RESPONSE ---\n%s",
+                san,
+                raw,
+            )
+            think_match = _THINK_RE.search(raw)
+            thinking = think_match.group(1).strip() if think_match else ""
+            text = _THINK_RE.sub("", raw).strip()
             if text:
-                return text, "llm"
+                return text, "llm", thinking
             break
     except Exception:
         pass
 
-    return _generate_comment(san, classification, best_move, cp_loss == 0), "template"
+    return _generate_comment(san, classification, best_move, cp_loss == 0), "template", ""
 
 
 # format_score imported from tutor.analysis
@@ -447,6 +469,12 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
     except Exception:
         pos_ctx = {}
 
+    # Compute deterministic move facts (captures, checks, castling, etc.)
+    try:
+        facts = move_facts(board, chess.Move.from_uci(req.move_uci))
+    except Exception:
+        facts = []
+
     # Build 3-level continuation tree (depth=12 to keep inference latency reasonable)
     board_after = board.copy()
     board_after.push(chess.Move.from_uci(req.move_uci))
@@ -455,7 +483,7 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
     except Exception:
         move_tree = []
 
-    comment, comment_source = await _llm_comment(
+    comment, comment_source, thinking = await _llm_comment(
         san,
         classification,
         best_move,
@@ -468,6 +496,8 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
         cct=cct,
         move_tree=move_tree,
         position_context=pos_ctx,
+        facts=facts,
+        model=req.model,
     )
 
     return AnalyzeResponse(
@@ -478,6 +508,7 @@ async def analyze_move(req: AnalyzeRequest) -> AnalyzeResponse:
         eval_before=eval_str,
         comment=comment,
         comment_source=comment_source,
+        thinking=thinking,
     )
 
 
