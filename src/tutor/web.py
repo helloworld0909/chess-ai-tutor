@@ -294,7 +294,7 @@ async def _llm_comment(
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
                 continue
 
-            # finish_reason == "stop" — extract coaching text
+            # finish_reason == "stop" — strip <think> blocks and return
             text = msg.content or ""
             text = _THINK_RE.sub("", text).strip()
             if text:

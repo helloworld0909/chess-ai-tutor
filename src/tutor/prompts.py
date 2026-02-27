@@ -50,11 +50,8 @@ SYSTEM_PROMPT = (
     "4–6 sentences.\n\n"
     "Calibrate length to complexity — a simple recapture needs 2 sentences, "
     "a deep positional sacrifice needs 6.\n\n"
-    "OUTPUT FORMAT: End your response with your coaching comment in this exact format:\\n"
-    "<comment>This move centralises the knight and eyes the weak d5 square.</comment>\\n"
-    "The text between those tags is the only part shown to the student — keep it "
-    "clean, direct coaching language with no meta-commentary. "
-    "Do NOT include URLs, links, or references to external resources in the comment."
+    "Write your coaching comment directly — no preamble, no meta-commentary, "
+    "no URLs or links. Your entire response is shown directly to the student."
 )
 
 
