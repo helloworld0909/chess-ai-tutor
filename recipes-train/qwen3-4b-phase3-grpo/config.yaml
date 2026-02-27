@@ -35,16 +35,16 @@ training:
   # OOM fix: reduce per_device_train_batch_size 4→2 and num_generations 4→2 to cut
   # backward activation footprint from 16 rollouts/GPU to 4 rollouts/GPU.
   # Constraint: per_device_train_batch_size must be divisible by num_generations.
-  num_generations: 2          # reduced from 4; 2 completions per prompt per GPU
+  num_generations: 4          # completions sampled per prompt per step
   max_prompt_length: 800      # tokens (system + user — measured p99=641, max=644; 800 = safe ceiling)
   max_completion_length: 1500 # thinking (~1000) + 3-5 lines (~500) — never truncate mid-output
-  stockfish_depth: 6          # depth 6 ≈ 16× faster than 12, ~2200 Elo — sufficient for reward signal
+  stockfish_depth: 12         # beta=0 freed ref model memory — CPU is idle, use full depth
 
-  # Batch — was 4 prompts × 4 gen = 16 rollouts/GPU → OOM during backward at step 6
-  # Now 2 prompts × 2 gen = 4 rollouts/GPU; effective batch same via more accumulation:
-  # 2 prompts/GPU × 2 GPUs × 2 gen × 8 accum = 64 rollouts
-  per_device_train_batch_size: 2   # per GPU; divisible by num_generations=2 ✓
-  gradient_accumulation_steps: 8   # effective batch = 2 × 2 × 2 × 8 = 64 rollouts
+  # Batch — beta=0 freed ~15GB/GPU (no ref model); peak backward now ~20GB, 12GB free
+  # Restored to original 4×4 = 16 rollouts/GPU — fits comfortably with headroom
+  # Effective batch: 4 prompts/GPU × 2 GPUs × 4 gen × 4 accum = 128 rollouts
+  per_device_train_batch_size: 4   # per GPU; divisible by num_generations=4 ✓
+  gradient_accumulation_steps: 4   # effective batch = 4 × 2 × 4 × 4 = 128 rollouts
 
   # Optimiser
   learning_rate: 5.0e-6
