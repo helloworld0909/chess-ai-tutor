@@ -275,7 +275,9 @@ def main():
             self.log_path = log_path
             self.step = 0
 
-        def _write_parallel(self, step: int, completions: list, all_scores: list) -> None:
+        def _write_parallel(
+            self, step: int, completions: list, all_scores: list, reward_secs: float = 0.0
+        ) -> None:
             """Log all completions with per-reward breakdown.
 
             all_scores: list of length num_funcs, each a list of length num_completions.
@@ -289,7 +291,10 @@ def main():
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(self.log_path, "a") as f:
                 f.write(f"\n{'=' * 80}\n")
-                f.write(f"STEP {step}  ({len(completions)} completions)  {ts}\n")
+                f.write(
+                    f"STEP {step}  ({len(completions)} completions)"
+                    f"  reward_time={reward_secs:.2f}s  {ts}\n"
+                )
                 f.write(f"{'=' * 80}\n")
                 for i, (comp, total) in enumerate(zip(completions, totals)):
                     comp_text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
@@ -321,14 +326,18 @@ def main():
     _reward_executor = _TPE(max_workers=7, thread_name_prefix="reward")
 
     def combined_parallel_reward(prompts, completions, **kwargs):
+        import time
+
+        t0 = time.perf_counter()
         futures = [
             _reward_executor.submit(fn, prompts, completions, **kwargs)
             for fn in _reward_fns_individual
         ]
         all_scores = [f.result() for f in futures]  # [[s0..sN], [s0..sN], ...]
+        reward_secs = time.perf_counter() - t0
 
         # Log breakdown and return sum across reward functions per completion
-        _logger._write_parallel(_logger.step + 1, completions, all_scores)
+        _logger._write_parallel(_logger.step + 1, completions, all_scores, reward_secs)
         _logger.step += 1
 
         n = len(completions)
