@@ -106,9 +106,7 @@ class TestExtractPositions:
         transcript = "e2e4 e7e5"
         import random
 
-        result = _extract_positions_from_transcript(
-            transcript, 1500, 1500, "amateur", random.Random(42)
-        )
+        result = _extract_positions_from_transcript(transcript, random.Random(42))
         assert result is None
 
     def test_valid_game_returns_position(self):
@@ -120,16 +118,11 @@ class TestExtractPositions:
         )
         import random
 
-        result = _extract_positions_from_transcript(
-            transcript, 1500, 1600, "amateur", random.Random(42)
-        )
+        result = _extract_positions_from_transcript(transcript, random.Random(42))
         assert result is not None
         assert "fen" in result
         assert "move_san" in result
         assert "move_uci" in result
-        assert result["white_elo"] == 1500
-        assert result["black_elo"] == 1600
-        assert result["tier"] == "amateur"
         # FEN should be a valid chess position
         board = chess.Board(result["fen"])
         assert board is not None
@@ -138,9 +131,7 @@ class TestExtractPositions:
         transcript = "e2e4 e7e5 g1f3 INVALID e7e5"
         import random
 
-        result = _extract_positions_from_transcript(
-            transcript, 1500, 1500, "amateur", random.Random(42)
-        )
+        result = _extract_positions_from_transcript(transcript, random.Random(42))
         assert result is None
 
 

@@ -47,21 +47,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 from chess_mcp.stockfish import Stockfish
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+# Suppress noisy HTTP logs from httpx (used by huggingface_hub during dataset download)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-# ELO tiers for stratified sampling
-ELO_TIERS = {
-    "amateur": (1000, 1600),
-    "intermediate": (1600, 2000),
-    "strong": (2000, 9999),
-}
-
-# Target fraction per tier
-TIER_FRACTIONS = {"amateur": 0.50, "intermediate": 0.35, "strong": 0.15}
 
 # Skip the first N full moves (each full move = 2 ply: one white, one black)
 # 2 → skip only the first 2 full moves (4 ply), sample from move 3 onward
@@ -101,85 +94,64 @@ def cp_to_label(cp: int | None, is_mate: bool = False, mate_value: int = 0) -> s
 # ---------------------------------------------------------------------------
 
 
+_HF_REPO = "austindavis/lichess_uci"
+# data/ shards contain {site, transcript} for all games in that month.
+# Each shard is ~150 MB and holds ~1.3M games. We download one at a time.
+_HF_SHARDS = [f"data/201801-{i:05d}-of-00013.parquet" for i in range(13)]
+
+
 def iter_lichess_games(
     target_positions: int,
-    tier_fractions: dict[str, float] = TIER_FRACTIONS,
     seed: int = 42,
 ) -> list[dict]:
-    """Stream games from austindavis/lichess_uci and return sampled positions.
+    """Sample positions from austindavis/lichess_uci parquet shards.
 
-    Returns a list of dicts: {fen, move_san, move_uci, white_elo, black_elo, tier}.
+    Returns a list of dicts: {fen, move_san, move_uci}.
+    Downloads one ~150 MB shard at a time (cached to HF hub after first run).
+    Stops as soon as target_positions is reached — no need to load all rows.
     """
     try:
-        from datasets import load_dataset
+        import pyarrow.parquet as pq
+        from huggingface_hub import hf_hub_download
     except ImportError:
-        raise ImportError("Run: uv add datasets")
+        raise ImportError("Run: uv add pyarrow huggingface_hub")
 
     rng = random.Random(seed)
-    tier_targets = {t: int(target_positions * f) for t, f in tier_fractions.items()}
-    tier_counts = {t: 0 for t in tier_fractions}
     positions: list[dict] = []
-
-    logger.info("Loading austindavis/lichess_uci (streaming)...")
-    # Use a single monthly split to avoid downloading the full 5B-game dataset
-    ds = load_dataset(
-        "austindavis/lichess_uci",
-        "201801-headers",
-        split="train",
-        streaming=True,
-        trust_remote_code=True,
-    )
-
     games_seen = 0
-    for game in ds:
-        if all(tier_counts[t] >= tier_targets[t] for t in tier_fractions):
+
+    for shard in _HF_SHARDS:
+        if len(positions) >= target_positions:
             break
+        logger.info("Loading shard %s...", shard)
+        local_path = hf_hub_download(repo_id=_HF_REPO, filename=shard, repo_type="dataset")
+        pf = pq.ParquetFile(local_path)
+        for batch in pf.iter_batches(batch_size=10000, columns=["transcript"]):
+            if len(positions) >= target_positions:
+                break
+            for transcript in batch.column("transcript").to_pylist():
+                if len(positions) >= target_positions:
+                    break
+                if not transcript:
+                    continue
+                games_seen += 1
+                extracted = _extract_positions_from_transcript(transcript, rng)
+                if extracted:
+                    positions.append(extracted)
+                if games_seen % 10000 == 0:
+                    logger.info(
+                        "Games scanned: %d | Positions collected: %d", games_seen, len(positions)
+                    )
 
-        games_seen += 1
-        white_elo = int(game.get("whiteelo") or 0)
-        black_elo = int(game.get("blackelo") or 0)
-        avg_elo = (white_elo + black_elo) // 2 if white_elo and black_elo else 0
-        if avg_elo == 0:
-            continue
-
-        tier = next((t for t, (lo, hi) in ELO_TIERS.items() if lo <= avg_elo < hi), None)
-        if tier is None or tier_counts[tier] >= tier_targets[tier]:
-            continue
-
-        # Parse moves from transcript field
-        transcript = game.get("transcript", "")
-        if not transcript:
-            continue
-
-        extracted = _extract_positions_from_transcript(transcript, white_elo, black_elo, tier, rng)
-        if extracted:
-            positions.append(extracted)
-            tier_counts[tier] += 1
-
-        if games_seen % 10000 == 0:
-            logger.info(
-                "Games: %d | Positions: %s",
-                games_seen,
-                " | ".join(f"{t}={tier_counts[t]}" for t in tier_fractions),
-            )
-
-    logger.info(
-        "Sampled %d positions from %d games. Tier breakdown: %s",
-        len(positions),
-        games_seen,
-        tier_counts,
-    )
+    logger.info("Sampled %d positions from %d games.", len(positions), games_seen)
     return positions
 
 
 def _extract_positions_from_transcript(
     transcript: str,
-    white_elo: int,
-    black_elo: int,
-    tier: str,
     rng: random.Random,
 ) -> dict | None:
-    """Replay a UCI transcript and pick one interesting position to sample."""
+    """Replay a UCI transcript and pick one random position to sample."""
     # transcript is space-separated UCI moves: "e2e4 e7e5 g1f3 ..."
     uci_moves = transcript.strip().split()
     if len(uci_moves) < MIN_MOVE_NUMBER * 2:
@@ -210,9 +182,6 @@ def _extract_positions_from_transcript(
                     "fen": fen_before,
                     "move_san": san,
                     "move_uci": uci,
-                    "white_elo": white_elo,
-                    "black_elo": black_elo,
-                    "tier": tier,
                 }
             )
         except Exception:
@@ -221,7 +190,6 @@ def _extract_positions_from_transcript(
     if not candidate_positions:
         return None
 
-    # Pick one position at random from middle-game range
     return rng.choice(candidate_positions)
 
 
@@ -409,9 +377,6 @@ async def process_batch(
                     "lines": lines,
                     "metadata": {
                         "source": "lichess_lines",
-                        "white_elo": pos["white_elo"],
-                        "black_elo": pos["black_elo"],
-                        "elo_tier": pos["tier"],
                     },
                 }
             except Exception as e:
@@ -444,16 +409,26 @@ async def main_async(args: argparse.Namespace) -> None:
     positions = iter_lichess_games(target_positions=args.target, seed=args.seed)
     logger.info("Got %d positions. Running Stockfish analysis...", len(positions))
 
+    # Process in chunks of 1000 so results are flushed to disk progressively
+    # rather than holding all 30k futures in memory at once.
+    CHUNK = 1000
     written = 0
-    skipped = 0
     with open(output_path, "w", encoding="utf-8") as f:
-        async for record in process_batch(positions, args.stockfish, args.workers):
-            f.write(json.dumps(record) + "\n")
-            written += 1
-            if written % 1000 == 0:
-                logger.info("Written %d / %d (skipped %d)", written, len(positions), skipped)
-        skipped = len(positions) - written
+        for chunk_start in range(0, len(positions), CHUNK):
+            chunk = positions[chunk_start : chunk_start + CHUNK]
+            async for record in process_batch(chunk, args.stockfish, args.workers):
+                f.write(json.dumps(record) + "\n")
+                written += 1
+            f.flush()
+            logger.info(
+                "Progress: %d / %d written (chunk %d/%d)",
+                written,
+                len(positions),
+                chunk_start // CHUNK + 1,
+                (len(positions) + CHUNK - 1) // CHUNK,
+            )
 
+    skipped = len(positions) - written
     logger.info("Done. Written: %d | Skipped: %d | Output: %s", written, skipped, output_path)
 
 
