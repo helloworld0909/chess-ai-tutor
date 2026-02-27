@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start vLLM server — Qwen3-4B-Thinking-2507 + chess-tutor LoRA
-# Port: 8101  |  Tensor parallel: 2  |  Max context: 8192
+# Port: 8100  |  Tensor parallel: 2  |  Max context: 8192
 #
 # API model names:
 #   "chess-tutor"                   → fine-tuned (with LoRA adapter)
@@ -22,7 +22,7 @@ if docker ps --format '{{.Names}}' | grep -q '^chess-ai-vllm-4b-lora$'; then
     exit 0
 fi
 
-echo "Starting Qwen3-4B-Thinking-2507 + LoRA on port 8101..."
+echo "Starting Qwen3-4B-Thinking-2507 + LoRA on port 8100..."
 echo "Adapter: $ADAPTER_DIR"
 docker compose -f "$RECIPE_DIR/docker-compose.yml" up -d
 
