@@ -192,6 +192,30 @@ def _eval_fen(fen: str, depth: int = 18) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# R0 — Format reward (cold-start signal)
+# ---------------------------------------------------------------------------
+
+
+def reward_format(
+    prompts: list,
+    completions: list,
+    **kwargs: Any,
+) -> list[float]:
+    """R0: reward presence of <line>...</line> tags in the completion.
+
+    This fires before legality is checked and gives the model a gradient
+    signal to produce the correct output structure during cold start.
+    Score: +1.0 if ≥1 <line> block found, -1.0 otherwise.
+    """
+    scores = []
+    for comp in completions:
+        text = comp[-1]["content"] if isinstance(comp, list) else str(comp)
+        has_line = bool(re.search(r"<line>.*?</line>", text, re.DOTALL))
+        scores.append(1.0 if has_line else -1.0)
+    return scores
+
+
+# ---------------------------------------------------------------------------
 # R1 — Move Legality
 # ---------------------------------------------------------------------------
 

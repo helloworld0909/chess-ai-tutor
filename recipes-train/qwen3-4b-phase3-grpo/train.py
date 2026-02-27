@@ -235,6 +235,7 @@ def main():
         reward_breadth,
         reward_depth,
         reward_eval_accuracy,
+        reward_format,
         reward_legality,
         reward_relevance,
     )
@@ -298,10 +299,11 @@ def main():
             _wrapped.__name__ = fn.__name__
             return _wrapped
 
-    _logger = _RewardLogger(num_funcs=6)
+    _logger = _RewardLogger(num_funcs=7)
 
     reward_fns = [
-        _logger.wrap(reward_legality_gate),  # R1
+        _logger.wrap(_make_weighted_reward(reward_format, 0.20)),  # R0: format cold-start
+        _logger.wrap(reward_legality_gate),  # R1: legality gate
         _logger.wrap(_make_weighted_reward(reward_eval_accuracy, 0.28)),  # R2
         _logger.wrap(_make_weighted_reward(reward_annotation_structural, 0.12)),  # R3a
         _logger.wrap(_make_weighted_reward(reward_depth, 0.10)),  # R4

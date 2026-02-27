@@ -16,6 +16,7 @@ from verification.rewards import (
     reward_breadth,
     reward_depth,
     reward_eval_accuracy,
+    reward_format,
     reward_legality,
     reward_relevance,
 )
@@ -142,6 +143,28 @@ class TestRewardLegality:
         prompt = [{"role": "user", "content": "no fen here"}]
         scores = reward_legality([prompt], [_completion(LEGAL_COMPLETION)])
         assert scores[0] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# R0 — reward_format
+# ---------------------------------------------------------------------------
+
+
+class TestRewardFormat:
+    def test_has_line_tags_scores_positive(self):
+        prompt = _make_prompt(STARTING_FEN)
+        scores = reward_format([prompt], [_completion(LEGAL_COMPLETION)])
+        assert scores[0] == 1.0
+
+    def test_no_line_tags_scores_negative(self):
+        prompt = _make_prompt(STARTING_FEN)
+        scores = reward_format([prompt], [_completion(EMPTY_COMPLETION)])
+        assert scores[0] == -1.0
+
+    def test_illegal_moves_but_correct_format_still_positive(self):
+        prompt = _make_prompt(STARTING_FEN)
+        scores = reward_format([prompt], [_completion(ILLEGAL_COMPLETION)])
+        assert scores[0] == 1.0
 
 
 # ---------------------------------------------------------------------------

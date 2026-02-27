@@ -35,8 +35,8 @@ training:
   # num_generations must divide per_device_train_batch_size exactly.
   # 8 completions × 1500 tokens at ~40 tok/s × 2 GPUs ≈ same wall-clock, 2× throughput
   num_generations: 4          # completions sampled per prompt per step
-  max_prompt_length: 600      # tokens (system + user only — measured p99=519)
-  max_completion_length: 700  # observed mean=403, max=570 → 700 gives headroom, cuts padding 2×
+  max_prompt_length: 800      # tokens (system + user — measured p99=641, max=644; 800 = safe ceiling)
+  max_completion_length: 1500 # thinking (~1000) + 3-5 lines (~500) — never truncate mid-output
   stockfish_depth: 12         # depth 12 ≈ 4× faster than 18, sufficient for reward signal
 
   # Batch — per_device_train_batch_size must be divisible by num_generations
