@@ -258,7 +258,9 @@ def render_board_png(
     try:
         import cairosvg
     except ImportError:
-        raise ImportError("cairosvg is required for PNG rendering. Install with: pip install cairosvg")
+        raise ImportError(
+            "cairosvg is required for PNG rendering. Install with: pip install cairosvg"
+        )
 
     svg = render_board_svg(fen, size, last_move, arrows, flip)
     png_bytes = cairosvg.svg2png(bytestring=svg.encode())

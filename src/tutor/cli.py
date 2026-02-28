@@ -20,10 +20,9 @@ from rich.table import Table
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chess_mcp.stockfish import Stockfish
 from chess_mcp.representations import fen_to_ascii
+from chess_mcp.stockfish import Stockfish
 from verification.legality import parse_move_flexible
-
 
 console = Console()
 
@@ -66,11 +65,13 @@ class TutorSession:
         move_num = self.board.fullmove_number
 
         console.print()
-        console.print(Panel(
-            ascii_board,
-            title=f"Move {move_num} - {side} to play",
-            border_style="blue",
-        ))
+        console.print(
+            Panel(
+                ascii_board,
+                title=f"Move {move_num} - {side} to play",
+                border_style="blue",
+            )
+        )
         console.print()
 
     def display_position_info(self):
@@ -445,11 +446,13 @@ async def run_interactive(
 )
 def main(stockfish: str | None, depth: int, fen: str | None):
     """Chess Tutor - Interactive chess analysis and learning."""
-    asyncio.run(run_interactive(
-        stockfish_path=stockfish,
-        depth=depth,
-        fen=fen,
-    ))
+    asyncio.run(
+        run_interactive(
+            stockfish_path=stockfish,
+            depth=depth,
+            fen=fen,
+        )
+    )
 
 
 if __name__ == "__main__":

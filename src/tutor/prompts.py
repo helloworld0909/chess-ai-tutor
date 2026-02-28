@@ -89,6 +89,8 @@ def format_line_generator_prompt(
     move_san: str,
     eval_str: str = "",
     facts: list[str] | None = None,
+    board_after_str: str = "",
+    fen_after: str = "",
 ) -> str:
     """Build the user message for the line generator task.
 
@@ -102,6 +104,9 @@ def format_line_generator_prompt(
 
     eval_line = f"Engine assessment: {eval_str}\n" if eval_str else ""
     move_section = f"## Move Played\n\nMove: {move_san}\n{eval_line}\n"
+    if board_after_str:
+        fen_after_line = f"FEN: {fen_after}\n" if fen_after else ""
+        move_section += f"\nBoard after the move:\n{board_after_str}\n{fen_after_line}\n"
 
     facts_section = ""
     if facts:

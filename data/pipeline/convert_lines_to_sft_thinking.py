@@ -350,15 +350,22 @@ def convert_sample(args_tuple: tuple) -> dict | None:
         return None
 
     facts: list[str] = []
-    if move_uci:
-        try:
-            move = chess.Move.from_uci(move_uci)
-            facts = move_facts(board, move)
-        except Exception:
-            pass
+    board_after_str = ""
+    fen_after = ""
+    try:
+        move = board.parse_san(move_san)
+        facts = move_facts(board, move)
+        board_after = board.copy()
+        board_after.push(move)
+        board_after_str = board_ascii(board_after)
+        fen_after = board_after.fen()
+    except Exception:
+        pass
 
     eval_str = _consensus_eval(sample["lines"])
-    user_content = format_line_generator_prompt(board_str, fen, move_san, eval_str, facts)
+    user_content = format_line_generator_prompt(
+        board_str, fen, move_san, eval_str, facts, board_after_str, fen_after
+    )
 
     # Run Stockfish for this position
     try:

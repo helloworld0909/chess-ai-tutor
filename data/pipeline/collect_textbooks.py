@@ -195,6 +195,7 @@ async def search_lichess_studies(
                 for line in response.text.strip().split("\n"):
                     if line:
                         import json
+
                         studies.append(json.loads(line))
                 return studies
             return []

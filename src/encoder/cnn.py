@@ -1,7 +1,8 @@
 """ResNet CNN trunk to encode an 8x8 chess board into an LLM embedding vector.
 
 Architecture loosely based on Leela Chess Zero (LCZero) trunks:
-- Input: 19-channel 8x8 spatial tensor (pieces, rights, turn, EP)
+- Input: 38-channel 8x8 spatial tensor (before + after board, each 19 channels)
+  For static position queries (no move), channels 19-37 == channels 0-18 (identity).
 - Blocks: Configurable number of ResidualBlocks ( Conv -> BN -> ReLU -> Conv -> BN -> + )
 - Head: AdaptiveAvgPool2d(1x1) -> Linear -> LLM embedding output dim
 """
@@ -34,7 +35,7 @@ class ResidualBlock(nn.Module):
 class ChessEncoder(nn.Module):
     def __init__(
         self,
-        in_channels: int = 19,
+        in_channels: int = 38,
         hidden_size: int = 256,
         num_blocks: int = 10,
         out_dim: int = 2560,  # Qwen3-4B hidden size
@@ -42,7 +43,9 @@ class ChessEncoder(nn.Module):
         """Build a 10-block PyTorch ResNet to produce a single soft token.
 
         Args:
-            in_channels: Depth of the board tensor (19 for our AlphaZero style)
+            in_channels: Depth of the board tensor.
+                38 = before (19) + after (19). For static positions, before == after.
+                19 = single board (legacy / ablation use).
             hidden_size: Number of filters in the ResNet trunk
             num_blocks: Number of Residual blocks to chain
             out_dim: Output dimension of the projection head (must match LLM hidden_size)

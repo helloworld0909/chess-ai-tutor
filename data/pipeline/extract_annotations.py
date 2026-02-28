@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -46,21 +46,55 @@ MIN_ANNOTATION_LENGTH = 20
 # Keywords that indicate instructive content
 INSTRUCTIVE_KEYWORDS = [
     # Explanatory
-    "because", "since", "therefore", "thus", "hence",
-    "in order to", "so that", "allowing",
+    "because",
+    "since",
+    "therefore",
+    "thus",
+    "hence",
+    "in order to",
+    "so that",
+    "allowing",
     # Chess concepts
-    "weak", "strong", "control", "pressure",
-    "pawn structure", "outpost", "file", "diagonal",
-    "attack", "defend", "threat", "pin", "fork",
-    "discovery", "skewer", "sacrifice", "exchange",
-    "development", "center", "initiative", "tempo",
-    "king safety", "castle", "activity",
+    "weak",
+    "strong",
+    "control",
+    "pressure",
+    "pawn structure",
+    "outpost",
+    "file",
+    "diagonal",
+    "attack",
+    "defend",
+    "threat",
+    "pin",
+    "fork",
+    "discovery",
+    "skewer",
+    "sacrifice",
+    "exchange",
+    "development",
+    "center",
+    "initiative",
+    "tempo",
+    "king safety",
+    "castle",
+    "activity",
     # Strategic
-    "plan", "idea", "strategy", "positional",
-    "advantage", "compensation", "equality",
+    "plan",
+    "idea",
+    "strategy",
+    "positional",
+    "advantage",
+    "compensation",
+    "equality",
     # Evaluation
-    "better", "worse", "winning", "losing",
-    "unclear", "complicated", "sharp",
+    "better",
+    "worse",
+    "winning",
+    "losing",
+    "unclear",
+    "complicated",
+    "sharp",
 ]
 
 
@@ -105,24 +139,63 @@ def extract_concepts(comment: str) -> list[str]:
     comment_lower = comment.lower()
 
     concept_patterns = {
-        "pawn structure": ["pawn structure", "isolated pawn", "doubled pawn",
-                          "backward pawn", "passed pawn", "pawn chain",
-                          "hanging pawns", "pawn majority"],
-        "piece activity": ["active", "passive", "piece activity", "coordination",
-                          "good bishop", "bad bishop", "knight outpost"],
-        "king safety": ["king safety", "castle", "king exposed", "shelter",
-                       "attack on king", "king in center"],
-        "center control": ["center", "central", "d4", "e4", "d5", "e5",
-                          "control of center"],
-        "tactics": ["pin", "fork", "skewer", "discovery", "zwischenzug",
-                   "in-between", "double attack", "remove defender",
-                   "overloaded", "deflection"],
-        "development": ["development", "develop", "piece out", "undeveloped",
-                       "lead in development"],
+        "pawn structure": [
+            "pawn structure",
+            "isolated pawn",
+            "doubled pawn",
+            "backward pawn",
+            "passed pawn",
+            "pawn chain",
+            "hanging pawns",
+            "pawn majority",
+        ],
+        "piece activity": [
+            "active",
+            "passive",
+            "piece activity",
+            "coordination",
+            "good bishop",
+            "bad bishop",
+            "knight outpost",
+        ],
+        "king safety": [
+            "king safety",
+            "castle",
+            "king exposed",
+            "shelter",
+            "attack on king",
+            "king in center",
+        ],
+        "center control": ["center", "central", "d4", "e4", "d5", "e5", "control of center"],
+        "tactics": [
+            "pin",
+            "fork",
+            "skewer",
+            "discovery",
+            "zwischenzug",
+            "in-between",
+            "double attack",
+            "remove defender",
+            "overloaded",
+            "deflection",
+        ],
+        "development": [
+            "development",
+            "develop",
+            "piece out",
+            "undeveloped",
+            "lead in development",
+        ],
         "space": ["space", "cramped", "space advantage"],
         "initiative": ["initiative", "tempo", "time", "attacking"],
-        "endgame": ["endgame", "ending", "king activity", "opposition",
-                   "outside passed pawn", "rook ending"],
+        "endgame": [
+            "endgame",
+            "ending",
+            "king activity",
+            "opposition",
+            "outside passed pawn",
+            "rook ending",
+        ],
         "opening": ["opening", "theory", "book move", "novelty"],
     }
 

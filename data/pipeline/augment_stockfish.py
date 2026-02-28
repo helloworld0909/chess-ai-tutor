@@ -9,14 +9,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+
+# Add parent to path for imports
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
 
 import chess
 
-# Add parent to path for imports
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from chess_mcp.stockfish import Stockfish
@@ -118,7 +119,7 @@ async def augment_position(
                 "engine_classification": classify_by_cp_loss(cp_loss),
                 "win_probability": round(win_prob, 3),
                 "refutation_line": pv[:5],
-            }
+            },
         }
 
         return augmented
@@ -258,12 +259,16 @@ def create_training_sample(augmented: dict, include_image_path: bool = False) ->
 
     if include_image_path:
         user_content = [
-            {"type": "image", "image": f"images/{augmented['game_id']}_{augmented['move_number']}.png"},
+            {
+                "type": "image",
+                "image": f"images/{augmented['game_id']}_{augmented['move_number']}.png",
+            },
             {"type": "text", "text": user_text},
         ]
     else:
         # Include ASCII board for text-only training
         import chess
+
         board = chess.Board(fen)
         ascii_board = str(board)
         user_content = f"Position:\n```\n{ascii_board}\n```\nFEN: {fen}\n\n{user_text}"
@@ -393,9 +398,7 @@ def main():
     # Create training dataset if requested
     if args.create_training:
         training_path = args.output.parent / "train.jsonl"
-        train_count = asyncio.run(
-            create_training_dataset(args.output, training_path)
-        )
+        train_count = asyncio.run(create_training_dataset(args.output, training_path))
         print(f"Created {train_count} training samples at {training_path}")
 
 

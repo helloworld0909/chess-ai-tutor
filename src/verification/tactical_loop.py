@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Awaitable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
     from chess_mcp.stockfish import Stockfish
@@ -29,9 +29,9 @@ class MoveClassification(Enum):
 
 # Centipawn loss thresholds for each classification
 CLASSIFICATION_THRESHOLDS = {
-    MoveClassification.BEST: 10,       # Within 0.1 pawn of best
-    MoveClassification.GREAT: 30,      # Within 0.3 pawn
-    MoveClassification.GOOD: 80,       # Minor inaccuracy
+    MoveClassification.BEST: 10,  # Within 0.1 pawn of best
+    MoveClassification.GREAT: 30,  # Within 0.3 pawn
+    MoveClassification.GOOD: 80,  # Minor inaccuracy
     MoveClassification.INACCURACY: 150,
     MoveClassification.MISTAKE: 300,
     # BLUNDER: anything worse
@@ -235,15 +235,9 @@ def _generate_correction(
             f"Key line: {' '.join(pv[:5])}"
         )
     elif engine_class == MoveClassification.INACCURACY:
-        return (
-            f"This move is slightly inaccurate. "
-            f"A better option would be {best_move}."
-        )
+        return f"This move is slightly inaccurate. A better option would be {best_move}."
     elif engine_class in [MoveClassification.BEST, MoveClassification.GREAT]:
-        return (
-            f"This is actually a strong move! "
-            f"It's close to the engine's top choice."
-        )
+        return f"This is actually a strong move! It's close to the engine's top choice."
     else:
         return f"The engine classifies this as '{engine_class.value}'."
 
@@ -290,9 +284,7 @@ class TacticalVerifier:
         current_response = llm_response
 
         for attempt in range(self.max_retries + 1):
-            result = await verify_llm_response(
-                fen, move, current_response, self.stockfish, depth
-            )
+            result = await verify_llm_response(fen, move, current_response, self.stockfish, depth)
 
             if result.valid:
                 return current_response, result

@@ -1,15 +1,15 @@
 """Tests for LLM tool definitions and handler."""
 
 import json
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from chess_mcp.stockfish import Stockfish
 from tutor.llm_tools import CHESS_TOOLS, ChessToolHandler
-
 
 # Test positions
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -56,8 +56,7 @@ class TestChessToolHandler:
     async def test_get_best_move(self, tool_handler):
         """Test get_best_move tool."""
         result = await tool_handler.handle_tool_call(
-            "get_best_move",
-            {"fen": STARTING_FEN, "depth": 10}
+            "get_best_move", {"fen": STARTING_FEN, "depth": 10}
         )
         data = json.loads(result)
 
@@ -70,10 +69,7 @@ class TestChessToolHandler:
     @pytest.mark.asyncio
     async def test_get_eval(self, tool_handler):
         """Test get_eval tool."""
-        result = await tool_handler.handle_tool_call(
-            "get_eval",
-            {"fen": STARTING_FEN, "depth": 10}
-        )
+        result = await tool_handler.handle_tool_call("get_eval", {"fen": STARTING_FEN, "depth": 10})
         data = json.loads(result)
 
         assert "score" in data
@@ -86,15 +82,13 @@ class TestChessToolHandler:
         """Test analyze_move for a good move."""
         # First get the best move
         best_result = await tool_handler.handle_tool_call(
-            "get_best_move",
-            {"fen": AFTER_E4_FEN, "depth": 10}
+            "get_best_move", {"fen": AFTER_E4_FEN, "depth": 10}
         )
         best_move = json.loads(best_result)["best_move"]
 
         # Analyze it
         result = await tool_handler.handle_tool_call(
-            "analyze_move",
-            {"fen": AFTER_E4_FEN, "move": best_move, "depth": 10}
+            "analyze_move", {"fen": AFTER_E4_FEN, "move": best_move, "depth": 10}
         )
         data = json.loads(result)
 
@@ -107,8 +101,7 @@ class TestChessToolHandler:
     async def test_analyze_move_bad(self, tool_handler):
         """Test analyze_move for a suboptimal move."""
         result = await tool_handler.handle_tool_call(
-            "analyze_move",
-            {"fen": AFTER_E4_FEN, "move": "a7a6", "depth": 10}
+            "analyze_move", {"fen": AFTER_E4_FEN, "move": "a7a6", "depth": 10}
         )
         data = json.loads(result)
 
@@ -119,10 +112,7 @@ class TestChessToolHandler:
     @pytest.mark.asyncio
     async def test_get_legal_moves(self, tool_handler):
         """Test get_legal_moves tool."""
-        result = await tool_handler.handle_tool_call(
-            "get_legal_moves",
-            {"fen": STARTING_FEN}
-        )
+        result = await tool_handler.handle_tool_call("get_legal_moves", {"fen": STARTING_FEN})
         data = json.loads(result)
 
         assert data["total"] == 20  # 16 pawn + 4 knight moves
@@ -135,8 +125,7 @@ class TestChessToolHandler:
     async def test_validate_move_legal(self, tool_handler):
         """Test validate_move for a legal move."""
         result = await tool_handler.handle_tool_call(
-            "validate_move",
-            {"fen": STARTING_FEN, "move": "e4"}
+            "validate_move", {"fen": STARTING_FEN, "move": "e4"}
         )
         data = json.loads(result)
 
@@ -149,8 +138,7 @@ class TestChessToolHandler:
     async def test_validate_move_illegal(self, tool_handler):
         """Test validate_move for an illegal move."""
         result = await tool_handler.handle_tool_call(
-            "validate_move",
-            {"fen": STARTING_FEN, "move": "e5"}
+            "validate_move", {"fen": STARTING_FEN, "move": "e5"}
         )
         data = json.loads(result)
 
@@ -160,10 +148,7 @@ class TestChessToolHandler:
     @pytest.mark.asyncio
     async def test_unknown_tool(self, tool_handler):
         """Test handling of unknown tool."""
-        result = await tool_handler.handle_tool_call(
-            "unknown_tool",
-            {"foo": "bar"}
-        )
+        result = await tool_handler.handle_tool_call("unknown_tool", {"foo": "bar"})
         data = json.loads(result)
 
         assert "error" in data

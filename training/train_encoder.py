@@ -11,13 +11,13 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from training.encoder_collator import EncoderDataCollator
+from training.encoder_model import ChessLMWithEncoder
 from training.lib import (
     load_config,
     load_jsonl_lines,
     make_training_args,
 )
-from training.encoder_model import ChessLMWithEncoder
-from training.encoder_collator import EncoderDataCollator
 
 _logger = logging.getLogger(__name__)
 
@@ -66,12 +66,12 @@ def setup_encoder_model(config_path: str):
     _logger.info("Wrapping with CNN Encoder...")
     # Wrap PEFT LLM with CNN
     model = ChessLMWithEncoder(llm=peft_llm, hidden_size=base_llm.config.hidden_size)
-    model.to(torch.bfloat16) # Ensures encoder weights are BF16
+    model.to(torch.bfloat16)  # Ensures encoder weights are BF16
     model.to(f"cuda:{local_rank}")
-    
+
     # Optional debug print for parameter counts
     model.print_trainable_parameters()
-    
+
     return model, tokenizer
 
 
@@ -87,6 +87,7 @@ def main():
 
     if wandb_cfg.get("enabled"):
         import wandb
+
         wandb.init(
             project=wandb_cfg.get("project", "chess-tutor"),
             name=wandb_cfg.get("name", "encoder-sft-4b"),
@@ -97,29 +98,45 @@ def main():
 
     keep_think = train_cfg.get("keep_think", True)
     _logger.info("Loading training data from %s", train_cfg["train_file"])
-    
+
     def _fmt(example):
         messages = example["messages"] if keep_think else []
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        return {"text": text, "fen": example["metadata"]["fen"]}
+        meta = example.get("metadata", {})
+        return {
+            "text": text,
+            "fen": meta.get("fen", ""),
+            "move_san": meta.get("move_san", ""),
+        }
 
     raw_train = load_jsonl_lines(train_cfg["train_file"])
-    # HuggingFace datasets library required for formatting
     from datasets import Dataset
-    train_dataset = Dataset.from_list(raw_train).map(_fmt, num_proc=4).select_columns(["text", "fen"])
+
+    train_dataset = (
+        Dataset.from_list(raw_train)
+        .map(_fmt, num_proc=4)
+        .select_columns(["text", "fen", "move_san"])
+    )
 
     eval_dataset = None
     if train_cfg.get("eval_file"):
         raw_eval = load_jsonl_lines(train_cfg["eval_file"])
-        eval_dataset = Dataset.from_list(raw_eval).map(_fmt, num_proc=4).select_columns(["text", "fen"])
+        eval_dataset = (
+            Dataset.from_list(raw_eval)
+            .map(_fmt, num_proc=4)
+            .select_columns(["text", "fen", "move_san"])
+        )
 
     training_args = make_training_args(config)
-    
+
     # Remove packing because it breaks 1-to-1 fens <-> tokens mapping requirement
     if train_cfg.get("packing", False):
-        _logger.warning("Packing disabled because Encoder requires 1 position = 1 sequence mapping.")
+        _logger.warning(
+            "Packing disabled because Encoder requires 1 position = 1 sequence mapping."
+        )
 
     from trl import SFTTrainer
+
     data_collator = EncoderDataCollator(tokenizer=tokenizer)
 
     trainer = SFTTrainer(
@@ -137,7 +154,7 @@ def main():
     trainer.train(resume_from_checkpoint=args.resume)
 
     _logger.info("Saving model to %s", training_args.output_dir)
-    # This will save the PEFT layout + CNN weights via state_dict magic natively 
+    # This will save the PEFT layout + CNN weights via state_dict magic natively
     # handled by PyTorch since it's a unified nn.Module
     trainer.save_model()
     tokenizer.save_pretrained(training_args.output_dir)

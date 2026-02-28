@@ -1,28 +1,28 @@
 """Tests for verification and legality modules."""
 
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from verification.legality import (
-    validate_fen,
-    validate_move,
-    parse_move_flexible,
-    get_legal_moves_for_piece,
-    filter_valid_moves,
-    is_game_over,
     MoveFormat,
     MoveValidationResult,
+    filter_valid_moves,
+    get_legal_moves_for_piece,
+    is_game_over,
+    parse_move_flexible,
+    validate_fen,
+    validate_move,
 )
 from verification.tactical_loop import (
+    MoveClassification,
     classify_move_by_cp_loss,
     extract_classification_from_text,
     is_classification_compatible,
-    MoveClassification,
 )
-
 
 # Test positions
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -283,30 +283,20 @@ class TestExtractClassificationFromText:
 class TestIsClassificationCompatible:
     def test_same_classification(self):
         """Test same classification is compatible."""
-        assert is_classification_compatible(
-            MoveClassification.BEST,
-            MoveClassification.BEST
-        )
+        assert is_classification_compatible(MoveClassification.BEST, MoveClassification.BEST)
 
     def test_adjacent_compatible(self):
         """Test adjacent classifications are compatible."""
         assert is_classification_compatible(
-            MoveClassification.BEST,
-            MoveClassification.GREAT,
-            tolerance=1
+            MoveClassification.BEST, MoveClassification.GREAT, tolerance=1
         )
 
     def test_far_incompatible(self):
         """Test far classifications are incompatible."""
         assert not is_classification_compatible(
-            MoveClassification.BEST,
-            MoveClassification.BLUNDER,
-            tolerance=1
+            MoveClassification.BEST, MoveClassification.BLUNDER, tolerance=1
         )
 
     def test_unknown_always_compatible(self):
         """Test unknown is always compatible."""
-        assert is_classification_compatible(
-            MoveClassification.UNKNOWN,
-            MoveClassification.BLUNDER
-        )
+        assert is_classification_compatible(MoveClassification.UNKNOWN, MoveClassification.BLUNDER)

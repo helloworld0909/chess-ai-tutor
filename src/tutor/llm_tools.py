@@ -24,17 +24,17 @@ CHESS_TOOLS = [
                 "properties": {
                     "fen": {
                         "type": "string",
-                        "description": "The chess position in FEN notation (e.g., 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1')"
+                        "description": "The chess position in FEN notation (e.g., 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1')",
                     },
                     "depth": {
                         "type": "integer",
                         "description": "Analysis depth (higher = stronger but slower). Default is 15.",
-                        "default": 15
-                    }
+                        "default": 15,
+                    },
                 },
-                "required": ["fen"]
-            }
-        }
+                "required": ["fen"],
+            },
+        },
     },
     {
         "type": "function",
@@ -44,19 +44,16 @@ CHESS_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "fen": {
-                        "type": "string",
-                        "description": "The chess position in FEN notation"
-                    },
+                    "fen": {"type": "string", "description": "The chess position in FEN notation"},
                     "depth": {
                         "type": "integer",
                         "description": "Analysis depth. Default is 15.",
-                        "default": 15
-                    }
+                        "default": 15,
+                    },
                 },
-                "required": ["fen"]
-            }
-        }
+                "required": ["fen"],
+            },
+        },
     },
     {
         "type": "function",
@@ -68,21 +65,21 @@ CHESS_TOOLS = [
                 "properties": {
                     "fen": {
                         "type": "string",
-                        "description": "The chess position in FEN notation BEFORE the move is made"
+                        "description": "The chess position in FEN notation BEFORE the move is made",
                     },
                     "move": {
                         "type": "string",
-                        "description": "The move to analyze in UCI format (e.g., 'e2e4', 'g1f3') or SAN format (e.g., 'e4', 'Nf3')"
+                        "description": "The move to analyze in UCI format (e.g., 'e2e4', 'g1f3') or SAN format (e.g., 'e4', 'Nf3')",
                     },
                     "depth": {
                         "type": "integer",
                         "description": "Analysis depth. Default is 15.",
-                        "default": 15
-                    }
+                        "default": 15,
+                    },
                 },
-                "required": ["fen", "move"]
-            }
-        }
+                "required": ["fen", "move"],
+            },
+        },
     },
     {
         "type": "function",
@@ -92,14 +89,11 @@ CHESS_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "fen": {
-                        "type": "string",
-                        "description": "The chess position in FEN notation"
-                    }
+                    "fen": {"type": "string", "description": "The chess position in FEN notation"}
                 },
-                "required": ["fen"]
-            }
-        }
+                "required": ["fen"],
+            },
+        },
     },
     {
         "type": "function",
@@ -109,18 +103,15 @@ CHESS_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "fen": {
-                        "type": "string",
-                        "description": "The chess position in FEN notation"
-                    },
+                    "fen": {"type": "string", "description": "The chess position in FEN notation"},
                     "move": {
                         "type": "string",
-                        "description": "The move to validate in UCI or SAN format"
-                    }
+                        "description": "The move to validate in UCI or SAN format",
+                    },
                 },
-                "required": ["fen", "move"]
-            }
-        }
+                "required": ["fen", "move"],
+            },
+        },
     },
 ]
 
@@ -196,14 +187,16 @@ class ChessToolHandler:
         if "error" in comparison:
             return json.dumps({"error": comparison["error"]})
 
-        return json.dumps({
-            "move": move,
-            "classification": comparison["classification"],
-            "is_best": comparison["is_best"],
-            "centipawn_loss": comparison["cp_loss"],
-            "best_move": comparison["best_move"],
-            "best_move_score": str(comparison.get("best_score", "")),
-        })
+        return json.dumps(
+            {
+                "move": move,
+                "classification": comparison["classification"],
+                "is_best": comparison["is_best"],
+                "centipawn_loss": comparison["cp_loss"],
+                "best_move": comparison["best_move"],
+                "best_move_score": str(comparison.get("best_score", "")),
+            }
+        )
 
     async def _get_legal_moves(self, args: dict) -> str:
         import chess
@@ -238,17 +231,21 @@ class ChessToolHandler:
         result = parse_move_flexible(fen, move)
 
         if not result.valid:
-            return json.dumps({
-                "legal": False,
-                "error": result.error,
-            })
+            return json.dumps(
+                {
+                    "legal": False,
+                    "error": result.error,
+                }
+            )
 
-        return json.dumps({
-            "legal": True,
-            "move_uci": result.move_uci,
-            "move_san": result.move_san,
-            "resulting_fen": result.resulting_fen,
-            "is_check": result.is_check,
-            "is_checkmate": result.is_checkmate,
-            "is_capture": result.is_capture,
-        })
+        return json.dumps(
+            {
+                "legal": True,
+                "move_uci": result.move_uci,
+                "move_san": result.move_san,
+                "resulting_fen": result.resulting_fen,
+                "is_check": result.is_check,
+                "is_checkmate": result.is_checkmate,
+                "is_capture": result.is_capture,
+            }
+        )

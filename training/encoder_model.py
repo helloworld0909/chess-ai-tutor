@@ -6,14 +6,14 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from peft import get_peft_model, LoraConfig
+from peft import LoraConfig, get_peft_model
 
 from src.encoder.cnn import ChessEncoder
 
 
 class ChessLMWithEncoder(nn.Module):
     """Combines a base LLM (e.g., Qwen3-4B) with a ResNet board encoder.
-    
+
     The encoder processes a 19-channel 8x8 spatial tensor and projects
     it into the LLM's embedding space. This 'soft token' is then
     prepended to the text embeddings before they are passed through
@@ -27,8 +27,8 @@ class ChessLMWithEncoder(nn.Module):
     ):
         super().__init__()
         self.llm = llm
-        # 12.5M param ResNet (10 blocks, 256 filters) -> 2560 dim output
-        self.cnn = ChessEncoder(out_dim=hidden_size)
+        # 12.6M param ResNet (10 blocks, 256 filters, 38-ch input) -> 2560 dim output
+        self.cnn = ChessEncoder(in_channels=38, out_dim=hidden_size)
 
         # Ensure the LLM embeddings are accessible
         if hasattr(self.llm, "get_input_embeddings"):
@@ -44,7 +44,7 @@ class ChessLMWithEncoder(nn.Module):
         input_ids: torch.LongTensor,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
-        **kwargs
+        **kwargs,
     ) -> Union[torch.Tensor, tuple]:
         """Forward pass merging spatial and structural inputs.
 
@@ -84,24 +84,21 @@ class ChessLMWithEncoder(nn.Module):
 
         # 6. Pass through the base LLM
         return self.llm(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            labels=labels,
-            **kwargs
+            inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels, **kwargs
         )
 
     def print_trainable_parameters(self):
         """Helper to verify parameter counts when wrapping with LoRA."""
         if hasattr(self.llm, "print_trainable_parameters"):
             self.llm.print_trainable_parameters()
-            
+
         trainable_params, all_param = 0, 0
         for param in self.cnn.parameters():
             num_params = param.numel()
             all_param += num_params
             if param.requires_grad:
                 trainable_params += num_params
-        
+
         print(
             f"Encoder params: trainable={trainable_params:,d} || "
             f"all={all_param:,d} || trainable%={100 * trainable_params / all_param:.4f}"

@@ -6,10 +6,10 @@ import pytest
 pytest.importorskip("chess")
 
 import sys
+
 sys.path.insert(0, "src")
 
-from chess_mcp.stockfish import Stockfish, Score, ScoreType, StockfishError
-
+from chess_mcp.stockfish import Score, ScoreType, Stockfish, StockfishError
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 ITALIAN_GAME_FEN = "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4"

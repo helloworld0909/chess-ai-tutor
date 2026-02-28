@@ -11,9 +11,9 @@ from typing import Any, Sequence
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
+    EmbeddedResource,
     TextContent,
     Tool,
-    EmbeddedResource,
 )
 
 from .stockfish import Stockfish
@@ -183,7 +183,9 @@ async def list_tools() -> list[Tool]:
 
 
 @app.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextContent | EmbeddedResource]:
+async def call_tool(
+    name: str, arguments: dict[str, Any]
+) -> Sequence[TextContent | EmbeddedResource]:
     """Handle tool calls."""
     if chess_tools is None:
         return [TextContent(type="text", text="Error: Chess tools not initialized")]

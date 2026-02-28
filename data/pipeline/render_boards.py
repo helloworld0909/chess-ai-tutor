@@ -162,14 +162,16 @@ def render_from_jsonl(
         side = pos.get("side_to_move", "white")
         flip = side == "black"
 
-        tasks.append((
-            position_id,
-            fen,
-            str(output_path),
-            size,
-            last_move,
-            flip,
-        ))
+        tasks.append(
+            (
+                position_id,
+                fen,
+                str(output_path),
+                size,
+                last_move,
+                flip,
+            )
+        )
 
     if not tasks:
         logger.info("No new positions to render")

@@ -172,11 +172,7 @@ def get_legal_moves_for_piece(fen: str, square: str) -> list[str]:
     except ValueError:
         return []
 
-    return [
-        move.uci()
-        for move in board.legal_moves
-        if move.from_square == sq
-    ]
+    return [move.uci() for move in board.legal_moves if move.from_square == sq]
 
 
 def filter_valid_moves(fen: str, moves: Sequence[str]) -> list[str]:

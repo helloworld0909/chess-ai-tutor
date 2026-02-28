@@ -1,20 +1,20 @@
 """Tests for chess position representations."""
 
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from chess_mcp.representations import (
+    create_training_context,
     fen_to_ascii,
     fen_to_piece_squares,
-    get_all_representations,
     format_for_llm,
-    create_training_context,
+    get_all_representations,
     render_board_svg,
 )
-
 
 # Test positions
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -205,10 +205,7 @@ class TestCreateTrainingContext:
 
     def test_with_question(self):
         """Test context with question."""
-        context = create_training_context(
-            STARTING_FEN,
-            question="What is the best move here?"
-        )
+        context = create_training_context(STARTING_FEN, question="What is the best move here?")
 
         assert context["question"] == "What is the best move here?"
 

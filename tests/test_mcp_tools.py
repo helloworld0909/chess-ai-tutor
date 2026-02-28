@@ -1,14 +1,14 @@
 """Tests for MCP chess tools."""
 
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from chess_mcp.stockfish import Stockfish
 from chess_mcp.tools import ChessTools, ToolResult
-
 
 # Test positions
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
