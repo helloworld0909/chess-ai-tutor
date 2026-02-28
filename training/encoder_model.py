@@ -14,8 +14,8 @@ from src.encoder.cnn import ChessEncoder
 class ChessLMWithEncoder(nn.Module):
     """Combines a base LLM (e.g., Qwen3-4B) with a ResNet board encoder.
 
-    The encoder processes a 19-channel 8x8 spatial tensor and projects
-    it into the LLM's embedding space. This 'soft token' is then
+    The encoder processes a 38-channel 8x8 spatial tensor (before+after board)
+    and projects it into the LLM's embedding space. This 'soft token' is then
     prepended to the text embeddings before they are passed through
     the transformer layers.
     """
@@ -24,11 +24,18 @@ class ChessLMWithEncoder(nn.Module):
         self,
         llm: nn.Module,
         hidden_size: int = 2560,
+        cnn_hidden_size: int = 512,
+        cnn_num_blocks: int = 15,
     ):
         super().__init__()
         self.llm = llm
-        # 12.6M param ResNet (10 blocks, 256 filters, 38-ch input) -> 2560 dim output
-        self.cnn = ChessEncoder(in_channels=38, out_dim=hidden_size)
+        # 72M param ResNet (15 blocks, 512 filters, 38-ch input) -> hidden_size dim output
+        self.cnn = ChessEncoder(
+            in_channels=38,
+            hidden_size=cnn_hidden_size,
+            num_blocks=cnn_num_blocks,
+            out_dim=hidden_size,
+        )
 
         # Ensure the LLM embeddings are accessible
         if hasattr(self.llm, "get_input_embeddings"):

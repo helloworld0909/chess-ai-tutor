@@ -10,6 +10,11 @@ model:
   attn_implementation: "sdpa"
   torch_dtype: bfloat16
 
+encoder:
+  hidden_size: 512      # must match pretrain config
+  num_blocks: 15        # must match pretrain config
+  pretrained_weights: "checkpoints/encoder-pretrain/checkpoint-580083/encoder_weights.pt"
+
 lora:
   r: 64
   alpha: 128

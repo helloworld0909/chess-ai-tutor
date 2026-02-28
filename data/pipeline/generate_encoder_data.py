@@ -258,7 +258,7 @@ def stream_triples(
     )
 
 
-def run_worker(args, shard_id):
+def run_worker(args, shard_id, progress_counter=None):
     # Setup logger for the worker to suppress HTTP spam
     log.setLevel(logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -278,6 +278,8 @@ def run_worker(args, shard_id):
 
     written_train = 0
     written_eval = 0
+    last_update_count = 0
+
     with (
         out_train.open("w", encoding="utf-8") as f_train,
         out_eval.open("w", encoding="utf-8") as f_eval,
@@ -292,6 +294,17 @@ def run_worker(args, shard_id):
             else:
                 f_train.write(line)
                 written_train += 1
+            
+            # Update shared counter every 10,000 records to reduce lock contention
+            if progress_counter and (written_train + written_eval) - last_update_count >= 10000:
+                with progress_counter.get_lock():
+                    progress_counter.value += (written_train + written_eval) - last_update_count
+                last_update_count = (written_train + written_eval)
+        
+        # Final update
+        if progress_counter:
+            with progress_counter.get_lock():
+                progress_counter.value += (written_train + written_eval) - last_update_count
 
     log.info("[Worker %d] Saved %d train records to %s", shard_id, written_train, out_train)
     log.info("[Worker %d] Saved %d eval records to %s", shard_id, written_eval, out_eval)
@@ -372,12 +385,28 @@ def main() -> None:
         import multiprocessing as mp
         import os
         import shutil
+        import time
+        from tqdm import tqdm
 
+        progress_counter = mp.Value("i", 0)
         processes = []
         for i in range(args.workers):
-            p = mp.Process(target=run_worker, args=(args, i))
+            p = mp.Process(target=run_worker, args=(args, i, progress_counter))
             p.start()
             processes.append(p)
+
+        # Parent process manages the tqdm bar
+        with tqdm(total=args.limit, desc="Generating 1B positions") as pbar:
+            last_val = 0
+            while any(p.is_alive() for p in processes):
+                current_val = progress_counter.value
+                pbar.update(current_val - last_val)
+                last_val = current_val
+                time.sleep(1.0)
+            
+            # Final update
+            current_val = progress_counter.value
+            pbar.update(current_val - last_val)
 
         for p in processes:
             p.join()

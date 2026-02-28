@@ -30,6 +30,7 @@ def setup_encoder_model(config_path: str):
     config = load_config(config_path)
     model_cfg = config.get("model", {})
     lora_cfg = config.get("lora", {})
+    encoder_cfg = config.get("encoder", {})
     model_name = model_cfg["model_name"]
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
@@ -64,12 +65,33 @@ def setup_encoder_model(config_path: str):
     peft_llm = get_peft_model(base_llm, lora_config)
 
     _logger.info("Wrapping with CNN Encoder...")
-    # Wrap PEFT LLM with CNN
-    model = ChessLMWithEncoder(llm=peft_llm, hidden_size=base_llm.config.hidden_size)
-    model.to(torch.bfloat16)  # Ensures encoder weights are BF16
+    model = ChessLMWithEncoder(
+        llm=peft_llm,
+        hidden_size=base_llm.config.hidden_size,
+        cnn_hidden_size=encoder_cfg.get("hidden_size", 512),
+        cnn_num_blocks=encoder_cfg.get("num_blocks", 15),
+    )
+    model.to(torch.bfloat16)
     model.to(f"cuda:{local_rank}")
 
-    # Optional debug print for parameter counts
+    # Load pretrained CNN weights if provided
+    encoder_weights_path = encoder_cfg.get("pretrained_weights")
+    if encoder_weights_path:
+        _logger.info("Loading pretrained encoder weights from %s", encoder_weights_path)
+        state = torch.load(
+            encoder_weights_path, map_location=f"cuda:{local_rank}", weights_only=True
+        )
+        missing, unexpected = model.cnn.load_state_dict(state, strict=True)
+        if missing:
+            _logger.warning("Missing keys in encoder weights: %s", missing)
+        if unexpected:
+            _logger.warning("Unexpected keys in encoder weights: %s", unexpected)
+        _logger.info("Pretrained encoder weights loaded successfully.")
+    else:
+        _logger.warning(
+            "No encoder.pretrained_weights set in config — CNN starts from random init!"
+        )
+
     model.print_trainable_parameters()
 
     return model, tokenizer
@@ -136,18 +158,27 @@ def main():
         )
 
     from trl import SFTTrainer
+    from trl.trainer.sft_config import SFTConfig
 
     data_collator = EncoderDataCollator(tokenizer=tokenizer)
 
+    dict_args = training_args.to_dict()
+    dict_args["hub_token"] = training_args.hub_token
+    dict_args.pop("push_to_hub_token", None)
+    sft_config = SFTConfig(
+        **dict_args,
+        max_length=train_cfg.get("max_seq_length", 1600),
+        dataset_text_field="text",
+        packing=False,
+        completion_only_loss=True,
+    )
+
     trainer = SFTTrainer(
         model=model,
-        args=training_args,
+        args=sft_config,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        max_seq_length=train_cfg.get("max_seq_length", 1600),
-        dataset_text_field="text",
-        packing=False,
     )
 
     _logger.info("Starting encoder integration training...")

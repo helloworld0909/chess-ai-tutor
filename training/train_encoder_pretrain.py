@@ -28,19 +28,19 @@ import argparse
 import json
 import logging
 import math
+import mmap
 import os
 import sys
 import time
 from pathlib import Path
 
 import chess
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
-import mmap
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.encoder.board_tensor import boards_to_tensor
@@ -61,23 +61,35 @@ logger = logging.getLogger(__name__)
 
 class EncoderPretrainDataset(Dataset):
     """Dataset of (board_tensor, cp_diff_scaled) pairs from fishnet-evals.
-    
+
     Uses memory offsets to avoid loading the entire 100M dataset into RAM.
     """
 
     def __init__(self, jsonl_path: str, limit: int = 0) -> None:
         self.jsonl_path = jsonl_path
         self.limit = limit
-        
+
         # We need a quick way to count lines or read them.
         # Since it's a huge file, we scan it once to build an array of byte offsets using mmap.
         logger.info("Building byte offsets for %s...", jsonl_path)
-        
-        # Preallocate a large numpy array for offsets to avoid python list memory bloat
-        # 100M int64 defaults to ~800MB.
-        estimated_lines = limit if limit > 0 else 100_000_000
+
+        # Preallocate a large numpy array for offsets to avoid python list memory bloat.
+        # Use file size / avg bytes-per-line as initial estimate to avoid repeated resizes.
+        # Falls back to limit if provided, or 1B as a safe upper bound for large datasets.
+        if limit > 0:
+            estimated_lines = limit
+        else:
+            try:
+                file_size = Path(jsonl_path).stat().st_size
+                # Sample first line to estimate average line length
+                with open(jsonl_path, "rb") as _f:
+                    sample = _f.readline()
+                avg_line_bytes = max(len(sample), 1)
+                estimated_lines = int(file_size / avg_line_bytes * 1.05)  # 5% headroom
+            except Exception:
+                estimated_lines = 1_000_000_000
         self.offsets = np.zeros(estimated_lines, dtype=np.int64)
-        
+
         count = 0
         with open(jsonl_path, "rb") as f:
             # First line starts at 0
@@ -86,19 +98,19 @@ class EncoderPretrainDataset(Dataset):
                 if count >= len(self.offsets):
                     # Grow array if estimate was too small
                     self.offsets = np.resize(self.offsets, len(self.offsets) * 2)
-                
+
                 self.offsets[count] = offset
                 offset += len(line)
                 count += 1
                 if limit and count >= limit:
                     break
-                    
+
         # Trim array to actual count
         self.offsets = self.offsets[:count]
         logger.info("Finished building byte offsets. Loaded %d records.", count)
-        
-        # We don't open the file/mmap here because DataLoader dataloader_num_workers 
-        # copies the dataset object to sub-processes. We will open it lazily the first 
+
+        # We don't open the file/mmap here because DataLoader dataloader_num_workers
+        # copies the dataset object to sub-processes. We will open it lazily the first
         # time __getitem__ is called by a worker thread.
         self.f = None
         self.mm = None
@@ -114,19 +126,19 @@ class EncoderPretrainDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         if self.mm is None:
             self._init_worker()
-            
+
         offset = self.offsets[idx]
         self.mm.seek(offset)
         line = self.mm.readline()
-        
+
         rec = json.loads(line)
-        
+
         board = chess.Board(rec["fen"])
         try:
             move = chess.Move.from_uci(rec["move_uci"])
         except Exception:
             move = None
-            
+
         board_tensor = boards_to_tensor(board, move)  # (38, 8, 8)
         label = torch.tensor(rec["cp_diff_scaled"], dtype=torch.float32)
         return board_tensor, label
@@ -196,6 +208,11 @@ def main() -> None:
         help="Path to YAML config",
     )
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
+    parser.add_argument(
+        "--finetune",
+        action="store_true",
+        help="Load weights from --resume but reset optimizer and step",
+    )
     args = parser.parse_args()
 
     rank, local_rank, world_size = setup_ddp()
@@ -267,7 +284,14 @@ def main() -> None:
         ckpt = torch.load(args.resume, map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model"])
         if is_main:
-            logger.info("Resumed from %s (epoch %d)", args.resume, ckpt.get("epoch", -1))
+            if args.finetune:
+                logger.info(
+                    "Fine-tuning from %s (epoch %d) — optimizer/scheduler reset",
+                    args.resume,
+                    ckpt.get("epoch", -1),
+                )
+            else:
+                logger.info("Resumed from %s (epoch %d)", args.resume, ckpt.get("epoch", -1))
 
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])

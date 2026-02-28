@@ -103,9 +103,11 @@ def test_boards_to_tensor_static():
 
 
 def test_chess_lm_with_encoder(mock_llm, mock_tokenizer):
-    wrapper = ChessLMWithEncoder(llm=mock_llm, hidden_size=256)
+    # Use small CNN params to match the mini LLM hidden_size=256
+    wrapper = ChessLMWithEncoder(
+        llm=mock_llm, hidden_size=256, cnn_hidden_size=32, cnn_num_blocks=2
+    )
 
-    # 2 batch items, seq length 5 — now using 38-channel board tensors
     batch_size = 2
     seq_len = 5
     board_tensor = torch.randn(batch_size, 38, 8, 8)
@@ -114,10 +116,48 @@ def test_chess_lm_with_encoder(mock_llm, mock_tokenizer):
 
     out = wrapper(board_tensor=board_tensor, input_ids=input_ids, attention_mask=attention_mask)
 
-    # Return from Qwen is an output object with `.logits`
     # shape: (Batch, SeqLen + 1_board_token, VocabSize)
     assert hasattr(out, "logits")
     assert out.logits.shape[:2] == (batch_size, seq_len + 1)
+
+
+def test_chess_lm_with_encoder_labels(mock_llm):
+    """Labels must be prepended with -100 for the board token position."""
+    wrapper = ChessLMWithEncoder(
+        llm=mock_llm, hidden_size=256, cnn_hidden_size=32, cnn_num_blocks=2
+    )
+    batch_size = 2
+    seq_len = 4
+    board_tensor = torch.randn(batch_size, 38, 8, 8)
+    input_ids = torch.randint(0, 1000, (batch_size, seq_len))
+    labels = torch.randint(0, 1000, (batch_size, seq_len))
+
+    out = wrapper(board_tensor=board_tensor, input_ids=input_ids, labels=labels)
+    assert out.loss is not None
+
+
+def test_chess_lm_with_encoder_load_pretrained_weights(mock_llm, tmp_path):
+    """encoder_weights.pt can be saved and reloaded into a fresh ChessLMWithEncoder."""
+    wrapper = ChessLMWithEncoder(
+        llm=mock_llm, hidden_size=256, cnn_hidden_size=32, cnn_num_blocks=2
+    )
+    # Save CNN weights in the same format as train_encoder_pretrain.py
+    weights_path = tmp_path / "encoder_weights.pt"
+    torch.save(wrapper.cnn.state_dict(), weights_path)
+
+    # Load into a fresh model
+    wrapper2 = ChessLMWithEncoder(
+        llm=mock_llm, hidden_size=256, cnn_hidden_size=32, cnn_num_blocks=2
+    )
+    state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    missing, unexpected = wrapper2.cnn.load_state_dict(state, strict=True)
+    assert missing == []
+    assert unexpected == []
+
+    # Both models must produce identical CNN outputs
+    x = torch.randn(2, 38, 8, 8)
+    with torch.no_grad():
+        assert torch.equal(wrapper.cnn(x), wrapper2.cnn(x))
 
 
 # ---------------------------------------------------------------------------
