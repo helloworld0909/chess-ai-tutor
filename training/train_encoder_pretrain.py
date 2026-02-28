@@ -39,6 +39,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
+import mmap
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.encoder.board_tensor import boards_to_tensor
@@ -58,33 +60,73 @@ logger = logging.getLogger(__name__)
 
 
 class EncoderPretrainDataset(Dataset):
-    """Dataset of (board_tensor, cp_diff_scaled) pairs from fishnet-evals."""
+    """Dataset of (board_tensor, cp_diff_scaled) pairs from fishnet-evals.
+    
+    Uses memory offsets to avoid loading the entire 100M dataset into RAM.
+    """
 
     def __init__(self, jsonl_path: str, limit: int = 0) -> None:
-        self.records: list[dict] = []
-        with open(jsonl_path, encoding="utf-8") as f:
+        self.jsonl_path = jsonl_path
+        self.limit = limit
+        
+        # We need a quick way to count lines or read them.
+        # Since it's a huge file, we scan it once to build an array of byte offsets using mmap.
+        logger.info("Building byte offsets for %s...", jsonl_path)
+        
+        # Preallocate a large numpy array for offsets to avoid python list memory bloat
+        # 100M int64 defaults to ~800MB.
+        estimated_lines = limit if limit > 0 else 100_000_000
+        self.offsets = np.zeros(estimated_lines, dtype=np.int64)
+        
+        count = 0
+        with open(jsonl_path, "rb") as f:
+            # First line starts at 0
+            offset = 0
             for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    self.records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-                if limit and len(self.records) >= limit:
+                if count >= len(self.offsets):
+                    # Grow array if estimate was too small
+                    self.offsets = np.resize(self.offsets, len(self.offsets) * 2)
+                
+                self.offsets[count] = offset
+                offset += len(line)
+                count += 1
+                if limit and count >= limit:
                     break
-        logger.info("Loaded %d records from %s", len(self.records), jsonl_path)
+                    
+        # Trim array to actual count
+        self.offsets = self.offsets[:count]
+        logger.info("Finished building byte offsets. Loaded %d records.", count)
+        
+        # We don't open the file/mmap here because DataLoader dataloader_num_workers 
+        # copies the dataset object to sub-processes. We will open it lazily the first 
+        # time __getitem__ is called by a worker thread.
+        self.f = None
+        self.mm = None
+
+    def _init_worker(self):
+        # Called once per worker process to safely open file handlers
+        self.f = open(self.jsonl_path, "rb")
+        self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
 
     def __len__(self) -> int:
-        return len(self.records)
+        return len(self.offsets)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        rec = self.records[idx]
+        if self.mm is None:
+            self._init_worker()
+            
+        offset = self.offsets[idx]
+        self.mm.seek(offset)
+        line = self.mm.readline()
+        
+        rec = json.loads(line)
+        
         board = chess.Board(rec["fen"])
         try:
             move = chess.Move.from_uci(rec["move_uci"])
         except Exception:
             move = None
+            
         board_tensor = boards_to_tensor(board, move)  # (38, 8, 8)
         label = torch.tensor(rec["cp_diff_scaled"], dtype=torch.float32)
         return board_tensor, label
