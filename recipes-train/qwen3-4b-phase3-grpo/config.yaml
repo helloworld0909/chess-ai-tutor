@@ -7,7 +7,7 @@
 # R1<0 short-circuits all downstream rewards to -1.0
 
 model:
-  model_name: "checkpoints/qwen3-4b-phase2-lines-sft/checkpoint-350"
+  model_name: "checkpoints/qwen3-4b-phase2-lines-sft"
   quantization: "8bit"
   attn_implementation: "sdpa"
   torch_dtype: bfloat16
@@ -27,8 +27,8 @@ lora:
   bias: none
 
 training:
-  train_file: data/processed/lines_sft.jsonl
-  eval_file:  data/processed/lines_sft_eval.jsonl
+  train_file: data/processed/lines_sft_thinking.jsonl
+  eval_file:  data/processed/lines_sft_thinking_eval.jsonl
 
   # Rollout generation
   # 2-GPU DDP via torchrun — each rank gets a full model replica on its own GPU.
@@ -76,8 +76,8 @@ training:
   eval_strategy: steps
   eval_steps: 100
   save_strategy: steps
-  save_steps: 100
-  save_total_limit: 5
+  save_steps: 10
+  save_total_limit: 20
 
 output_dir: checkpoints/qwen3-4b-phase3-grpo
 

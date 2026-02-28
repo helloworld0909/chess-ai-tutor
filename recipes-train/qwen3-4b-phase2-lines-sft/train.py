@@ -98,13 +98,20 @@ def main():
 
     model, tokenizer = setup(args.config)
 
-    _logger.info("Loading training data from %s", train_cfg["train_file"])
-    train_dataset = format_dataset(load_jsonl_lines(train_cfg["train_file"]), tokenizer)
+    keep_think = train_cfg.get("keep_think", False)
+    _logger.info(
+        "Loading training data from %s (keep_think=%s)", train_cfg["train_file"], keep_think
+    )
+    train_dataset = format_dataset(
+        load_jsonl_lines(train_cfg["train_file"]), tokenizer, keep_think=keep_think
+    )
 
     eval_dataset = None
     if train_cfg.get("eval_file"):
         _logger.info("Loading eval data from %s", train_cfg["eval_file"])
-        eval_dataset = format_dataset(load_jsonl_lines(train_cfg["eval_file"]), tokenizer)
+        eval_dataset = format_dataset(
+            load_jsonl_lines(train_cfg["eval_file"]), tokenizer, keep_think=keep_think
+        )
 
     training_args = make_training_args(config)
 

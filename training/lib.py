@@ -125,16 +125,20 @@ def strip_think_from_target(messages: list[dict]) -> list[dict]:
     return result
 
 
-def format_dataset(dataset: Dataset, tokenizer) -> Dataset:
+def format_dataset(dataset: Dataset, tokenizer, keep_think: bool = False) -> Dataset:
     """Apply the model's native chat template to every sample.
 
-    Strips <think> blocks from assistant targets before formatting.
+    By default strips <think> blocks from assistant targets so SFT only trains
+    on the output format. Pass keep_think=True to include the thinking scaffold
+    in the loss (used for Phase 2 thinking-distillation SFT).
     Samples that fail chat template application are filtered out.
     """
 
     def _fmt(example: dict) -> dict:
         try:
-            messages = strip_think_from_target(example["messages"])
+            messages = (
+                example["messages"] if keep_think else strip_think_from_target(example["messages"])
+            )
             text = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
