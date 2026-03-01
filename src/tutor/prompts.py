@@ -138,6 +138,87 @@ def board_ascii(board: chess.Board) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Joint task system prompt (Phase 2 SFT)
+# ---------------------------------------------------------------------------
+
+JOINT_SYSTEM_PROMPT = (
+    "You are an expert chess coach analysing a student's game move by move.\n\n"
+    "You will receive the board position, the student's move, and the engine's top 5 key lines "
+    "as sequences of board positions. Each move in the key lines is shown as a board embedding "
+    "followed by the SAN notation.\n\n"
+    "Your task has two parts:\n\n"
+    "PART 1 — Annotate the engine lines:\n"
+    "Output exactly 5 lines in this format:\n"
+    "<line>LINE 1: move (purpose) → move (purpose) → ... | eval: <label></line>\n"
+    "<line>LINE 2: move (purpose) → move (purpose) → ... | eval: <label></line>\n"
+    "<line>LINE 3: move (purpose) → move (purpose) → ... | eval: <label></line>\n"
+    "<line>LINE 4: move (purpose) → move (purpose) → ... | eval: <label></line>\n"
+    "<line>LINE 5: move (purpose) → move (purpose) → ... | eval: <label></line>\n\n"
+    "Rules for annotation:\n"
+    "- Copy the moves exactly as shown in the Engine Key Lines — do not invent or change them\n"
+    "- Add a purpose annotation in parentheses for each move explaining the idea\n"
+    "- The eval label covers the final position from White's perspective:\n"
+    "  winning for white | good for white | equal | good for black | winning for black\n"
+    "- Do not include raw centipawn numbers anywhere\n\n"
+    "PART 2 — Coaching comment:\n"
+    "After the 5 annotated lines, write a 2–4 sentence coaching comment directly to the student. "
+    "The comment must:\n"
+    "- Address the quality of the student's move (agree with the engine classification)\n"
+    "- Reference the key ideas from the engine lines you just annotated\n"
+    "- Be written in second person ('You play Nd5…') — never use first person\n"
+    "- Not parrot the classification label or raw eval numbers\n\n"
+    "Output format (after your thinking):\n"
+    "<line>LINE 1: ...</line>\n"
+    "...\n"
+    "<line>LINE 5: ...</line>\n\n"
+    "[coaching comment]"
+)
+
+
+def format_joint_user_prompt(
+    board_ascii_str: str,
+    fen: str,
+    move_san: str,
+    eval_str: str = "",
+    facts: list[str] | None = None,
+    board_after_str: str = "",
+    fen_after: str = "",
+    key_lines: list[str] | None = None,
+) -> str:
+    """Build the user message for the joint annotation + coaching task (Phase 2).
+
+    key_lines: list of plain SAN line strings, e.g.:
+        ["Nd5 → e4 → Nc3 → d5", "Nf6 → g5 → Bg2 → h4", ...]
+    Sentinels are injected later by _inject_move_tokens in the train script.
+    """
+    fen_line = f"FEN: {fen}\n" if fen else ""
+    position_section = f"## Position\n\nBoard before the move:\n{board_ascii_str}\n{fen_line}\n"
+
+    eval_line = f"Engine assessment: {eval_str}\n" if eval_str else ""
+    move_section = f"## Move Played\n\nMove: {move_san}\n{eval_line}\n"
+    if board_after_str:
+        fen_after_line = f"FEN: {fen_after}\n" if fen_after else ""
+        move_section += f"\nBoard after the move:\n{board_after_str}\n{fen_after_line}\n"
+
+    facts_section = ""
+    if facts:
+        facts_section = "## Verified Move Facts\n\n" + "\n".join(f"- {f}" for f in facts) + "\n\n"
+
+    lines_section = ""
+    if key_lines:
+        line_strs = "\n".join(f"Line {i + 1}: {l}" for i, l in enumerate(key_lines))
+        lines_section = f"## Engine Key Lines\n\n{line_strs}\n\n"
+
+    task_section = (
+        "## Task\n\n"
+        "Annotate each engine key line with move purposes, then give a coaching comment "
+        "to the student about their move."
+    )
+
+    return f"{position_section}{move_section}{facts_section}{lines_section}{task_section}"
+
+
+# ---------------------------------------------------------------------------
 # Textbook rewrite system prompt
 # ---------------------------------------------------------------------------
 

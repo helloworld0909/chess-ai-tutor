@@ -1,0 +1,75 @@
+# Qwen3-4B Encoder Phase 1 SFT — Joint annotation + coaching task
+# Qwen3-4B + pretrained ChessEncoder (72M params) + QLoRA
+# Joint task: model sees student move + engine key lines as board embeddings in
+# the user prompt; outputs annotated lines + coaching comment (pure text, no sentinels).
+# Dataset: lines_joint_sft (~31k textbook positions with Stockfish lines + expert coaching comments)
+# DDP: 2× RTX 5090  |  effective batch = 84 (1 × 2 GPUs × 42)
+
+model:
+  model_name: "Qwen/Qwen3-4B-Thinking-2507"
+  quantization: "8bit"
+  attn_implementation: "sdpa"
+  torch_dtype: bfloat16
+
+encoder:
+  hidden_size: 512      # must match pretrain config
+  num_blocks: 15        # must match pretrain config
+  pretrained_weights: "checkpoints/encoder-pretrain/checkpoint-580083/encoder_weights.pt"
+
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  bias: none
+  task_type: CAUSAL_LM
+
+training:
+  train_file: data/processed/lines_joint_sft.jsonl
+  eval_file:  data/processed/lines_joint_sft_eval.jsonl
+  max_seq_length: 2400   # prompts are longer (key lines + coaching comment)
+  keep_think: true       # include <think> blocks in SFT loss
+  packing: false
+
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 42  # effective batch = 84 (1 × 2 GPUs × 42)
+
+  learning_rate: 1.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  num_train_epochs: 1
+
+  optim: adamw_8bit
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  gradient_checkpointing: false
+  bf16: true
+  dataloader_num_workers: 8
+  ddp_find_unused_parameters: false
+  use_liger_kernel: false   # ChessLMWithEncoder is not a PreTrainedModel
+
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 20
+  save_strategy: steps
+  save_steps: 20
+  save_total_limit: 5
+
+  seed: 42
+
+output_dir: checkpoints/qwen3-4b-encoder-phase1-sft
+
+wandb:
+  enabled: false
+  project: "chess-tutor"
+  name: "qwen3-4b-encoder-phase1-sft"
+  tags: ["encoder-sft", "phase1-sft", "joint-task"]

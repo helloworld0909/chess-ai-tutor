@@ -71,7 +71,7 @@ def load_jsonl(path: str) -> Dataset:
     logger.info(
         "Loaded %d textbook samples (out of %d total) from %s", len(data), total_found, path
     )
-    return Dataset.from_list(data)
+    return data
 
 
 def load_jsonl_lines(path: str) -> Dataset:
@@ -100,7 +100,7 @@ def load_jsonl_lines(path: str) -> Dataset:
         total_found,
         path,
     )
-    return Dataset.from_list(data)
+    return data
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
@@ -232,7 +232,7 @@ def make_training_args(config: dict):
         dataloader_num_workers=train_cfg.get("dataloader_num_workers", 4),
         report_to="wandb" if wandb_cfg.get("enabled") else "none",
         deepspeed=deepspeed_path,
-        use_liger_kernel=True,
+        use_liger_kernel=train_cfg.get("use_liger_kernel", True),
         ddp_find_unused_parameters=train_cfg.get("ddp_find_unused_parameters", False),
     )
 
@@ -259,12 +259,12 @@ def run_training(config_path: str, model, tokenizer, resume_from_checkpoint=None
     packing = train_cfg.get("packing", False)
 
     logger.info("Loading training data from %s", train_cfg["train_file"])
-    train_dataset = format_dataset(load_jsonl(train_cfg["train_file"]), tokenizer)
+    train_dataset = format_dataset(Dataset.from_list(load_jsonl(train_cfg["train_file"])), tokenizer)
 
     eval_dataset = None
     if train_cfg.get("eval_file"):
         logger.info("Loading eval data from %s", train_cfg["eval_file"])
-        eval_dataset = format_dataset(load_jsonl(train_cfg["eval_file"]), tokenizer)
+        eval_dataset = format_dataset(Dataset.from_list(load_jsonl(train_cfg["eval_file"])), tokenizer)
 
     training_args = make_training_args(config)
 

@@ -42,7 +42,7 @@ import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.encoder.board_tensor import boards_to_tensor
 from src.encoder.cnn import ChessEncoder
 from training.lib import load_config
