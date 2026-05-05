@@ -706,6 +706,7 @@ def main() -> None:
         temperature=grpo_args.temperature,
         sync_every=sync_every,
         log_sample_every=train_cfg.get("log_sample_every", 50),
+        two_pass=True,
     )
 
     # Reward function — solution_ucis and completion_tokens from rollout stash
