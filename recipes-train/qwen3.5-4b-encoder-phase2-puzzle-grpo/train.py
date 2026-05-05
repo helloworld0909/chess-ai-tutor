@@ -272,6 +272,10 @@ def make_rollout_func(
                     "temperature": temperature,
                     "max_new_tokens": max_new_tokens,
                     "n": 1,
+                    "stop_token_ids": [
+                        tokenizer.eos_token_id,
+                        tokenizer.convert_tokens_to_ids("<|im_end|>"),
+                    ],
                 },
                 "return_logprob": True,
                 "logprob_start_len": -1,
@@ -306,6 +310,10 @@ def make_rollout_func(
                     "temperature": 0.0,
                     "max_new_tokens": 16,
                     "n": 1,
+                    "stop_token_ids": [
+                        tokenizer.eos_token_id,
+                        tokenizer.convert_tokens_to_ids("<|im_end|>"),
+                    ],
                 },
                 "return_logprob": True,
                 "logprob_start_len": -1,
